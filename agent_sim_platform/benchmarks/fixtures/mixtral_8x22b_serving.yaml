@@ -1,0 +1,36 @@
+name: mixtral_8x22b_serving
+domain: serving
+source: "Mixtral 8x22B serving benchmarks (vLLM / SGLang community repros)"
+source_url: "https://huggingface.co/mistralai/Mixtral-8x22B-v0.1"
+hardware_names:
+  - H100-SXM5
+model_name: 1T-MoE
+algorithm_name: moe
+config:
+  arrival_rate_per_sec: 5.0
+  arrival_distribution: poisson
+  target_ttft_ms: 3000.0
+  target_tpot_ms: 80.0
+  max_batch_size: 32
+  max_queue_len: 16
+  prefill_decode_disaggregation: false
+  request_length_mean: 2048
+  request_length_std: 1024
+  output_length_mean: 512
+  output_length_std: 256
+  simulation_duration_seconds: 60.0
+observed_metrics:
+  throughput_req_per_sec: 4.0
+  throughput_tok_per_sec: 12000.0
+  ttft_p50_ms: 400.0
+  ttft_p99_ms: 1000.0
+  tpot_p50_ms: 12.0
+  tpot_p99_ms: 25.0
+  requests_dropped: 0
+tolerance:
+  mape: 0.35
+  throughput_mape: 0.35
+  latency_mape: 0.45
+notes: >
+  Mixtral 8x22B is a 141B total / 39B active MoE. We use 1T-MoE as a
+  large-MoE proxy; absolute numbers are approximate.

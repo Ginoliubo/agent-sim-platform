@@ -1,0 +1,37 @@
+name: llama3_70b_pretrain
+domain: training
+source: "The LLaMA 3 Herd of Models"
+source_url: "https://arxiv.org/abs/2407.21783"
+hardware_names:
+  - H100-SXM5
+model_name: 70B-Dense
+algorithm_name: dense
+config:
+  strategy: pretrain
+  dataset_tokens: 15000000000000
+  epochs: 1
+  global_batch_size: 1024
+  micro_batch_size: 1
+  sequence_length: 8192
+  optimizer: adamw
+  gradient_checkpointing: true
+  zero_stage: 3
+  mfu_target: 0.42
+  parallelism:
+    dp: 4096
+    tp: 1
+    pp: 1
+    ep: 1
+    sp: 1
+observed_metrics:
+  total_time_seconds: 1814400
+  gpu_hours: 4147200
+  mfu: 0.42
+  memory_per_gpu_gb: 14.0
+tolerance:
+  mape: 0.30
+  mfu_mape: 0.25
+  memory_mape: 0.30
+notes: >
+  LLaMA-3 70B trained on ~15T tokens. GPU-hour estimate is approximate;
+  actual figure not fully disclosed. Sequence length assumed 8192.

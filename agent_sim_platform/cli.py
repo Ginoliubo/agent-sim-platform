@@ -9,6 +9,8 @@ from typing import List, Optional
 from . import __version__
 from .algorithms import DEFAULT_REGISTRY as ALGORITHM_REGISTRY
 from .config import OPTIMIZATION_PRESETS
+from .benchmarks import DEFAULT_REGISTRY as BENCHMARK_REGISTRY
+from .calibration import CalibrationConfig, CalibrationEngine, format_report
 from .data_models import (
     AgentHarnessSpec,
     InferenceServiceConfig,
@@ -19,6 +21,7 @@ from .data_models import (
 )
 from .hardware import DEFAULT_REGISTRY as HW_REGISTRY
 from .models import DEFAULT_REGISTRY as MODEL_REGISTRY
+from .profiling import ProfilingOrchestrator
 from .reports.json_reporter import to_json
 from .reports.markdown_reporter import to_markdown
 from .simulation import (
@@ -300,6 +303,113 @@ def cmd_list_algorithms(args) -> int:
     return 0
 
 
+def cmd_list_benchmarks(args) -> int:
+    fixtures = BENCHMARK_REGISTRY.list(domain=args.domain)
+    print(f"{'Name':<30} {'Domain':<10} {'Model':<12} {'Hardware':<20} Source")
+    print("-" * 110)
+    for f in fixtures:
+        hw = ", ".join(f.hardware_names)
+        print(f"{f.name:<30} {f.domain:<10} {f.model_name:<12} {hw:<20} {f.source}")
+    return 0
+
+
+def cmd_benchmark(args) -> int:
+    fixture = BENCHMARK_REGISTRY.get(args.name)
+    engine = CalibrationEngine(CalibrationConfig(domain=fixture.domain))
+    result = engine.evaluate_fixture(fixture)
+    output = {
+        "name": result["name"],
+        "domain": result["domain"],
+        "observed": result["observed"],
+        "predicted": result["predicted"],
+        "errors": result["errors"],
+    }
+    text = json.dumps(output, indent=2, ensure_ascii=False)
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+        print(f"Saved benchmark result to {args.output}")
+    else:
+        print(text)
+    return 0
+
+
+def cmd_calibrate(args) -> int:
+    config = CalibrationConfig(
+        domain=args.domain,
+        fit_params=args.fit_params.split(",") if args.fit_params else [],
+        max_iterations=args.max_iterations,
+        tolerance=args.tolerance,
+    )
+    engine = CalibrationEngine(config)
+    report = engine.fit(BENCHMARK_REGISTRY)
+
+    if args.output:
+        Path(args.output).write_text(
+            json.dumps(report.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"Saved calibration report to {args.output}")
+    else:
+        print(format_report(report))
+    return 0
+
+
+def cmd_profile(args) -> int:
+    orchestrator = ProfilingOrchestrator()
+    if args.trace:
+        report = orchestrator.profile_trace(
+            args.trace,
+            hardware_name=args.hardware,
+            model_name=args.model,
+        )
+    elif args.input:
+        raw = Path(args.input).read_text(encoding="utf-8")
+        result = SimulationResult.from_dict(json.loads(raw))
+        report = orchestrator.profile_simulation(result)
+    else:
+        print("Error: --trace or --input required", file=sys.stderr)
+        return 1
+
+    md = _profiling_report_md(report)
+    if args.output:
+        Path(args.output).write_text(md, encoding="utf-8")
+        print(f"Saved profile report to {args.output}")
+    else:
+        print(md)
+    return 0
+
+
+def _profiling_report_md(report) -> str:
+    lines = ["# Profiling Report", ""]
+    for layer_name, data in report.layers.items():
+        lines.append(f"## {layer_name.capitalize()} Layer")
+        lines.append("")
+        for key, value in data.items():
+            if isinstance(value, dict):
+                lines.append(f"- **{key}**: {value}")
+            elif isinstance(value, float):
+                lines.append(f"- **{key}**: {value:.4f}")
+            else:
+                lines.append(f"- **{key}**: {value}")
+        lines.append("")
+
+    if report.correlations:
+        lines.append("## Cross-Layer Correlations")
+        lines.append("")
+        for key, value in report.correlations.items():
+            lines.append(f"- **{key}**: {value}")
+        lines.append("")
+
+    if report.recommendations:
+        lines.append("## Recommendations")
+        lines.append("")
+        for rec in report.recommendations:
+            lines.append(f"- {rec}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-sim",
@@ -423,6 +533,31 @@ def build_parser() -> argparse.ArgumentParser:
     # list-algorithms
     subparsers.add_parser("list-algorithms", help="List algorithm family presets")
 
+    # list-benchmarks
+    p_lb = subparsers.add_parser("list-benchmarks", help="List benchmark fixtures")
+    p_lb.add_argument("--domain", choices=["training", "serving", "capacity"], help="Filter by domain")
+
+    # benchmark
+    p_bench = subparsers.add_parser("benchmark", help="Run a single benchmark fixture")
+    p_bench.add_argument("--name", required=True, help="Benchmark fixture name")
+    p_bench.add_argument("--output", help="Output JSON file")
+
+    # calibrate
+    p_cal = subparsers.add_parser("calibrate", help="Calibrate simulation constants against benchmarks")
+    p_cal.add_argument("--domain", default="all", choices=["training", "serving", "capacity", "all"], help="Domain to calibrate")
+    p_cal.add_argument("--fit-params", help="Comma-separated parameter names to fit")
+    p_cal.add_argument("--max-iterations", type=int, default=20, help="Max coordinate-descent iterations")
+    p_cal.add_argument("--tolerance", type=float, default=0.01, help="Improvement tolerance")
+    p_cal.add_argument("--output", help="Output JSON or Markdown file")
+
+    # profile
+    p_prof = subparsers.add_parser("profile", help="Multi-layer profiling of a trace or simulation result")
+    p_prof.add_argument("--trace", help="Path to trace.jsonl")
+    p_prof.add_argument("--input", help="Path to SimulationResult JSON")
+    p_prof.add_argument("--hardware", help="Hardware preset name (for trace override)")
+    p_prof.add_argument("--model", help="Model preset name (for trace override)")
+    p_prof.add_argument("--output", help="Output Markdown file")
+
     return parser
 
 
@@ -443,6 +578,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         "list-models": cmd_list_models,
         "list-workloads": cmd_list_workloads,
         "list-algorithms": cmd_list_algorithms,
+        "list-benchmarks": cmd_list_benchmarks,
+        "benchmark": cmd_benchmark,
+        "calibrate": cmd_calibrate,
+        "profile": cmd_profile,
     }
     return dispatch[args.command](args)
 

@@ -1,0 +1,38 @@
+name: llama2_70b_pretrain
+domain: training
+source: "LLaMA 2: Open Foundation and Fine-Tuned Chat Models"
+source_url: "https://arxiv.org/abs/2307.09288"
+hardware_names:
+  - A100-SXM4
+model_name: 70B-Dense
+algorithm_name: dense
+config:
+  strategy: pretrain
+  dataset_tokens: 2000000000000
+  epochs: 1
+  global_batch_size: 976
+  micro_batch_size: 1
+  sequence_length: 4096
+  optimizer: adamw
+  gradient_checkpointing: true
+  zero_stage: 3
+  mfu_target: 0.43
+  parallelism:
+    dp: 2048
+    tp: 1
+    pp: 1
+    ep: 1
+    sp: 1
+observed_metrics:
+  total_time_seconds: 3024000
+  gpu_hours: 1720320
+  mfu: 0.43
+  memory_per_gpu_gb: 7.0
+tolerance:
+  mape: 0.25
+  mfu_mape: 0.20
+  memory_mape: 0.30
+notes: >
+  Reported ~1.72M A100-80GB GPU-hours for 2T tokens with global batch size ~4M tokens.
+  global_batch_size here is sequences = 4M tokens / 4096 seq_len ≈ 976.
+  Parallelism inferred from public training logs; actual topology may vary.

@@ -418,6 +418,61 @@ class SimulationResult:
 
 
 # ---------------------------------------------------------------------------
+# Benchmark & Calibration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BenchmarkCase:
+    """An authoritative benchmark fixture for calibration.
+
+    A fixture pairs a known input configuration with observed metrics from an
+    external source (paper, tech report, or reproducible benchmark).
+    """
+
+    name: str
+    domain: str  # "training" | "serving" | "capacity"
+    source: str
+    source_url: str = ""
+    hardware_names: List[str] = field(default_factory=list)
+    model_name: str = ""
+    algorithm_name: str = "dense"
+    config: Dict = field(default_factory=dict)
+    observed_metrics: Dict = field(default_factory=dict)
+    tolerance: Dict = field(default_factory=dict)
+    notes: str = ""
+
+
+@dataclass
+class CalibrationConfig:
+    """Configuration for the calibration / auto-fitting engine."""
+
+    domain: str = "all"  # "training" | "serving" | "capacity" | "all"
+    metric: str = "mape"  # "mape" | "rmse" | "combined"
+    fit_params: List[str] = field(
+        default_factory=lambda: [
+            "mfu_target",
+            "default_prefill_utilization",
+            "default_decode_utilization",
+            "activation_overhead_factor",
+            "continuous_batching_efficiency",
+        ]
+    )
+    max_iterations: int = 100
+    tolerance: float = 0.05
+
+
+@dataclass
+class ProfilingReport:
+    """Multi-layer profiling report for a simulation or trace."""
+
+    layers: Dict[str, Dict] = field(default_factory=dict)
+    correlations: Dict = field(default_factory=dict)
+    recommendations: List[str] = field(default_factory=list)
+    raw_samples: List[Dict] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 

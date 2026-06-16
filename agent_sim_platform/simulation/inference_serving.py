@@ -13,6 +13,7 @@ from typing import Dict, List
 
 import numpy as np
 
+from .. import config as sim_config
 from ..config import FEASIBILITY_MAX_MEMORY_UTIL
 from ..data_models import (
     AgentHarnessSpec,
@@ -88,7 +89,8 @@ class InferenceServingEngine:
         """Time to process one token during prefill (compute-bound)."""
         flops_per_token = self.model.flops_per_token_forward()
         effective_flops = (
-            self.hardware.effective_flops(self.precision, 0.35) * self.gpu_count
+            self.hardware.effective_flops(self.precision, sim_config.DEFAULT_PREFILL_UTILIZATION)
+            * self.gpu_count
         )
         return flops_per_token / effective_flops
 
@@ -96,7 +98,8 @@ class InferenceServingEngine:
         """Time to generate one token during decode (memory-bound)."""
         flops_per_token = self.model.flops_per_token_forward()
         effective_compute = (
-            self.hardware.effective_flops(self.precision, 0.50) * self.gpu_count
+            self.hardware.effective_flops(self.precision, sim_config.DEFAULT_DECODE_UTILIZATION)
+            * self.gpu_count
         )
         compute_time = flops_per_token / effective_compute
 
@@ -104,7 +107,7 @@ class InferenceServingEngine:
         bytes_per_token = (
             active_params * self.bytes_per_param + self.kv_bytes_per_token
         )
-        effective_bw = self.hardware.memory_bw_bytes_s() * 0.50 * self.gpu_count
+        effective_bw = self.hardware.memory_bw_bytes_s() * sim_config.DEFAULT_DECODE_UTILIZATION * self.gpu_count
         memory_time = bytes_per_token / effective_bw
 
         return max(compute_time, memory_time)

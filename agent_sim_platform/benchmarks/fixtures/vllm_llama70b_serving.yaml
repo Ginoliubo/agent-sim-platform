@@ -1,0 +1,36 @@
+name: vllm_llama70b_serving
+domain: serving
+source: "vLLM: Easy, Fast, and Cheap LLM Serving with PagedAttention"
+source_url: "https://arxiv.org/abs/2309.06180"
+hardware_names:
+  - H100-SXM5
+model_name: 70B-Dense
+algorithm_name: dense
+config:
+  arrival_rate_per_sec: 10.0
+  arrival_distribution: poisson
+  target_ttft_ms: 2000.0
+  target_tpot_ms: 50.0
+  max_batch_size: 64
+  max_queue_len: 32
+  prefill_decode_disaggregation: false
+  request_length_mean: 4096
+  request_length_std: 2048
+  output_length_mean: 512
+  output_length_std: 256
+  simulation_duration_seconds: 60.0
+observed_metrics:
+  throughput_req_per_sec: 10.0
+  throughput_tok_per_sec: 45000.0
+  ttft_p50_ms: 200.0
+  ttft_p99_ms: 500.0
+  tpot_p50_ms: 5.0
+  tpot_p99_ms: 10.0
+  requests_dropped: 0
+tolerance:
+  mape: 0.30
+  throughput_mape: 0.30
+  latency_mape: 0.40
+notes: >
+  ShareGPT-like workload on 8×H100 with FP8 continuous batching.
+  Observed values are approximate medians from vLLM reproducible benchmarks.

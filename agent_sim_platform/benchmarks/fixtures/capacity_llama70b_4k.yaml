@@ -1,0 +1,25 @@
+name: capacity_llama70b_4k
+domain: capacity
+source: "Public deployment notes: LLaMA-2 70B FP16 fits on 2×A100-80GB"
+source_url: ""
+hardware_names:
+  - A100-SXM4
+model_name: 70B-Dense
+algorithm_name: dense
+config:
+  context_tokens: 4096
+  precision: FP16
+  kv_precision: FP16
+  tp: 2
+  pp: 1
+  batch_size: 1
+observed_metrics:
+  memory_required_gb: 145.0
+  decode_latency_per_token_ms: 35.0
+  fits: true
+tolerance:
+  memory_mape: 0.15
+  latency_mape: 0.30
+notes: >
+  FP16 weights (140 GB) plus KV cache (~4 GB) and activations fit within
+  2×A100-80GB. Decode latency is a rough deployment median.

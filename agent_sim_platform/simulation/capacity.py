@@ -1,6 +1,7 @@
 """Capacity estimator: memory, latency, and throughput for a model+context."""
 
-from ..config import DEFAULT_DECODE_UTILIZATION, DEFAULT_PREFILL_UTILIZATION, FEASIBILITY_MAX_MEMORY_UTIL
+from .. import config as sim_config
+from ..config import FEASIBILITY_MAX_MEMORY_UTIL
 from ..data_models import HardwareSpec, ModelSpec, SimulationResult
 from ..utils.units import gb_to_bytes
 
@@ -58,7 +59,7 @@ class CapacityEstimator:
         """Time to prefill a prompt of given length."""
         flops = 2 * self.model.active_params_b * 1e9 * context_tokens
         effective_flops = (
-            self.hardware.effective_flops(self.precision, DEFAULT_PREFILL_UTILIZATION)
+            self.hardware.effective_flops(self.precision, sim_config.DEFAULT_PREFILL_UTILIZATION)
             * self.total_gpus
         )
         return flops / effective_flops
@@ -67,7 +68,7 @@ class CapacityEstimator:
         """Decode latency for one token."""
         flops = 2 * self.model.active_params_b * 1e9
         effective_compute = (
-            self.hardware.effective_flops(self.precision, DEFAULT_DECODE_UTILIZATION)
+            self.hardware.effective_flops(self.precision, sim_config.DEFAULT_DECODE_UTILIZATION)
             * self.total_gpus
         )
         compute_time = flops / effective_compute
@@ -76,7 +77,7 @@ class CapacityEstimator:
             self.model.active_params_b * 1e9 * self.model.bytes_per_param(self.precision)
             + self.model.kv_bytes_per_token(self.kv_precision)
         )
-        effective_bw = self.hardware.memory_bw_bytes_s() * DEFAULT_DECODE_UTILIZATION * self.total_gpus
+        effective_bw = self.hardware.memory_bw_bytes_s() * sim_config.DEFAULT_DECODE_UTILIZATION * self.total_gpus
         memory_time = bytes_per_token / effective_bw
 
         return max(compute_time, memory_time)

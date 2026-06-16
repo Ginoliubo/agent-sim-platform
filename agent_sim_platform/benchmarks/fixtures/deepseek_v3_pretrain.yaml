@@ -1,0 +1,38 @@
+name: deepseek_v3_pretrain
+domain: training
+source: "DeepSeek-V3 Technical Report"
+source_url: "https://arxiv.org/abs/2412.19437"
+hardware_names:
+  - H100-SXM5
+model_name: 1T-MoE
+algorithm_name: moe
+config:
+  strategy: pretrain
+  dataset_tokens: 14800000000000
+  epochs: 1
+  global_batch_size: 4096
+  micro_batch_size: 1
+  sequence_length: 4096
+  optimizer: adamw
+  gradient_checkpointing: true
+  zero_stage: 1
+  mfu_target: 0.38
+  parallelism:
+    dp: 128
+    tp: 8
+    pp: 8
+    ep: 8
+    sp: 1
+observed_metrics:
+  total_time_seconds: 6048000
+  gpu_hours: 2788000
+  mfu: 0.38
+  memory_per_gpu_gb: 70.0
+tolerance:
+  mape: 0.35
+  mfu_mape: 0.30
+  memory_mape: 0.30
+notes: >
+  DeepSeek-V3 reported 2.788M H800 GPU-hours for 14.8T tokens.
+  We use 1T-MoE (1000B total / 150B active) as a representative MoE proxy;
+  actual DeepSeek-V3 is 671B total / ~37B active with MLA.

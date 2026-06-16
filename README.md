@@ -39,6 +39,22 @@ python3 -m agent_sim_platform compare-hardware \
   --model 10T-MoE \
   --context 1M
 
+# Benchmark calibration
+python3 -m agent_sim_platform benchmark \
+  --name llama2_70b_pretrain
+
+python3 -m agent_sim_platform calibrate \
+  --domain training \
+  --fit-params mfu_target,activation_overhead_factor \
+  --output calibration.json
+
+# Multi-layer profiling
+python3 -m agent_sim_platform profile \
+  --trace trace.jsonl \
+  --hardware H100-SXM5 \
+  --model 70B-Dense \
+  --output profile.md
+
 # Capacity estimation
 python3 -m agent_sim_platform capacity \
   --hardware Rubin-Ultra \
@@ -106,6 +122,10 @@ agent-sim list-hardware
 agent-sim list-models
 agent-sim list-workloads
 agent-sim list-algorithms
+agent-sim list-benchmarks     # List benchmark fixtures
+agent-sim benchmark           # Evaluate one benchmark fixture
+agent-sim calibrate           # Auto-calibrate constants against benchmarks
+agent-sim profile             # Multi-layer profiling of trace or result
 ```
 
 ## Project Structure
@@ -131,6 +151,9 @@ agent_sim_platform/
 - [Algorithms](docs/algorithms.md)
 - [Training Simulation](docs/training.md)
 - [Inference Serving](docs/inference-serving.md)
+- [Benchmarks](docs/benchmarks.md)
+- [Calibration](docs/calibration.md)
+- [Profiling](docs/profiling.md)
 
 ## Running Tests
 

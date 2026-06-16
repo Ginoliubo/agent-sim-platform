@@ -1,0 +1,104 @@
+{
+  "fixture_results": [
+    {
+      "name": "capacity_llama70b_4k",
+      "domain": "capacity",
+      "observed": {
+        "memory_required_gb": 145.0,
+        "decode_latency_per_token_ms": 35.0,
+        "fits": true
+      },
+      "predicted": {
+        "memory_required_gb": 143.069515006167,
+        "decode_latency_per_token_ms": 38.88907093333333
+      },
+      "errors": {
+        "memory_required_gb": {
+          "abs": 1.930484993833005,
+          "pct": 0.013313689612641415,
+          "observed": 145.0,
+          "predicted": 143.069515006167
+        },
+        "decode_latency_per_token_ms": {
+          "abs": 3.889070933333329,
+          "pct": 0.11111631238095226,
+          "observed": 35.0,
+          "predicted": 38.88907093333333
+        }
+      }
+    },
+    {
+      "name": "__baseline_summary__",
+      "domain": "meta",
+      "observed": {
+        "baseline_overall_mape": 0.5066615259491778
+      },
+      "predicted": {
+        "fitted_overall_mape": 0.06221500099679684
+      },
+      "errors": {
+        "mape_improvement": {
+          "observed": 0.5066615259491778,
+          "predicted": 0.06221500099679684,
+          "abs": 0.44444652495238096,
+          "pct": 0.8772059889879275
+        }
+      }
+    }
+  ],
+  "metric_summary": {
+    "memory_required_gb": {
+      "mape": 0.013313689612641415,
+      "rmse": 1.930484993833005,
+      "samples": 1
+    },
+    "decode_latency_per_token_ms": {
+      "mape": 0.11111631238095226,
+      "rmse": 3.889070933333329,
+      "samples": 1
+    }
+  },
+  "overall_mape": 0.06221500099679684,
+  "overall_rmse": 3.0701502435477477,
+  "fitted_values": {
+    "default_decode_utilization": 0.9
+  },
+  "iterations": [
+    {
+      "iteration": 0,
+      "values": {
+        "mfu_target": 0.35,
+        "default_prefill_utilization": 0.35,
+        "default_decode_utilization": 0.5,
+        "activation_overhead_factor": 1.0,
+        "continuous_batching_efficiency": 1.0,
+        "kv_compression_ratio": 1.0
+      },
+      "mape": 0.5066615259491778
+    },
+    {
+      "iteration": 1,
+      "values": {
+        "mfu_target": 0.35,
+        "default_prefill_utilization": 0.35,
+        "default_decode_utilization": 0.9,
+        "activation_overhead_factor": 1.0,
+        "continuous_batching_efficiency": 1.0,
+        "kv_compression_ratio": 1.0
+      },
+      "mape": 0.06221500099679684
+    },
+    {
+      "iteration": 2,
+      "values": {
+        "mfu_target": 0.35,
+        "default_prefill_utilization": 0.35,
+        "default_decode_utilization": 0.9,
+        "activation_overhead_factor": 1.0,
+        "continuous_batching_efficiency": 1.0,
+        "kv_compression_ratio": 1.0
+      },
+      "mape": 0.06221500099679684
+    }
+  ]
+}
