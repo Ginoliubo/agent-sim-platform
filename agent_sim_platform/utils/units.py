@@ -66,15 +66,16 @@ def format_bytes(b: Number) -> str:
 
 
 def parse_size(size_str: str) -> int:
-    """Parse strings like '8K', '32K', '1M', '10M' into integer token counts.
+    """Parse strings like '8K', '1M', '1G', '1T' into integer counts.
 
-    Supports K=1e3, M=1e6, G=1e9, B=billion.
+    Supports K=1e3, M=1e6, G=1e9, T=1e12, B=billion.
     """
     size_str = size_str.strip().upper()
     multipliers = {
         "K": 1e3,
         "M": 1e6,
         "G": 1e9,
+        "T": 1e12,
         "B": 1e9,
     }
     for suffix, mult in multipliers.items():

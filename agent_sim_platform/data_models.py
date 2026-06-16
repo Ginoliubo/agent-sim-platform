@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from .algorithms.base import AlgorithmFamily
+
 
 # ---------------------------------------------------------------------------
 # Hardware
@@ -90,6 +92,16 @@ class ModelSpec:
     vocab_size: int = 150000
     architecture: str = "dense"  # "dense" | "moe"
     context_len_default: int = 32768
+    algorithm_family: Optional[AlgorithmFamily] = None
+
+    def __post_init__(self):
+        # Backward compatibility: if algorithm_family not set, infer from architecture
+        if self.algorithm_family is None:
+            from .algorithms.families import DENSE, MOE
+
+            object.__setattr__(
+                self, "algorithm_family", MOE if self.is_moe else DENSE
+            )
 
     @property
     def is_moe(self) -> bool:
@@ -110,14 +122,29 @@ class ModelSpec:
         return self.active_params_b * 1e9 * bytes_per_param / (1024**3)
 
     def kv_bytes_per_token(self, kv_precision: str = "FP8") -> float:
-        """KV cache bytes per token.
+        """KV cache bytes per token, delegated to algorithm family."""
+        if self.algorithm_family is None:
+            # Fallback to dense transformer heuristic
+            n_kv_heads = max(1, self.n_heads // 4)
+            kv_per_token = 2 * self.n_layers * n_kv_heads * self.d_head
+            return kv_per_token * BYTES_PER_PARAM[kv_precision.upper()]
+        return self.algorithm_family.kv_bytes_per_token(self, kv_precision)
 
-        Uses GQA heuristic: n_kv_heads = max(1, n_heads // 4).
-        """
-        n_kv_heads = max(1, self.n_heads // 4)
-        kv_per_token = 2 * self.n_layers * n_kv_heads * self.d_head
-        bytes_per_param = BYTES_PER_PARAM[kv_precision.upper()]
-        return kv_per_token * bytes_per_param
+    def flops_per_token_forward(self) -> float:
+        """FLOPs for one forward pass token."""
+        if self.algorithm_family is None:
+            return 2 * self.active_params_b * 1e9
+        return self.algorithm_family.flops_per_token_forward(self)
+
+    def flops_per_token_backward(self) -> float:
+        """FLOPs for one backward pass token."""
+        if self.algorithm_family is None:
+            return 4 * self.active_params_b * 1e9
+        return self.algorithm_family.flops_per_token_backward(self)
+
+    def flops_per_token_training(self) -> float:
+        """FLOPs for one training token (forward + backward)."""
+        return self.flops_per_token_forward() + self.flops_per_token_backward()
 
     def gpu_needed(self, memory_gb: float, precision: str = "FP8", overhead: float = 1.15) -> int:
         """Minimum accelerator count to fit weights given per-device memory."""
@@ -226,6 +253,79 @@ class OptimizationConfig:
     def kv_bytes_per_token(self, base_kv_bytes: float) -> float:
         """KV bytes after compression."""
         return base_kv_bytes * self.kv_compression_ratio
+
+
+# ---------------------------------------------------------------------------
+# Parallelism
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ParallelismConfig:
+    """Distributed parallelism configuration for training."""
+
+    dp: int = 1   # data parallel
+    tp: int = 1   # tensor parallel
+    pp: int = 1   # pipeline parallel
+    ep: int = 1   # expert parallel (MoE)
+    sp: int = 1   # sequence parallel
+
+    @property
+    def total_gpus(self) -> int:
+        return self.dp * self.tp * self.pp * self.ep
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TrainingConfig:
+    """Configuration for a training job."""
+
+    strategy: str = "pretrain"  # pretrain | sft | rlhf | dpo | grpo
+    dataset_tokens: int = 0
+    epochs: int = 1
+    global_batch_size: int = 1024
+    micro_batch_size: int = 1
+    sequence_length: int = 4096
+    optimizer: str = "adamw"    # adamw | sgd
+    gradient_checkpointing: bool = True
+    zero_stage: int = 1         # 0/1/2/3
+    mfu_target: float = 0.35    # model FLOPs utilization target
+    parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
+    data_loading_overhead_fraction: float = 0.05
+    notes: str = ""
+
+    @property
+    def total_tokens(self) -> int:
+        return int(self.dataset_tokens * self.epochs)
+
+    @property
+    def steps(self) -> int:
+        tokens_per_step = self.global_batch_size * self.sequence_length
+        return max(1, self.total_tokens // tokens_per_step)
+
+
+# ---------------------------------------------------------------------------
+# Inference Service
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InferenceServiceConfig:
+    """Configuration for an inference serving workload."""
+
+    arrival_rate_per_sec: float = 1.0
+    arrival_distribution: str = "poisson"  # poisson | bursty | fixed
+    target_ttft_ms: float = 2000.0
+    target_tpot_ms: float = 50.0
+    max_batch_size: int = 128
+    max_queue_len: int = 64
+    prefill_decode_disaggregation: bool = False
+    request_length_mean: int = 4096
+    request_length_std: int = 2048
+    output_length_mean: int = 512
+    output_length_std: int = 256
+    simulation_duration_seconds: float = 60.0
 
 
 # ---------------------------------------------------------------------------

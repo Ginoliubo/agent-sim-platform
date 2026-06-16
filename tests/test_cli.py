@@ -59,6 +59,83 @@ def test_cli_capacity(capsys):
     assert data["feasible"] is True
 
 
+def test_cli_list_algorithms(capsys):
+    assert main(["list-algorithms"]) == 0
+    captured = capsys.readouterr()
+    assert "dense" in captured.out
+    assert "mamba" in captured.out
+
+
+def test_cli_train(capsys):
+    assert main([
+        "train",
+        "--hardware", "H100-SXM5",
+        "--model", "70B-Dense",
+        "--algorithm", "dense",
+        "--dataset-tokens", "1B",
+        "--dp", "8",
+        "--tp", "8",
+    ]) == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["feasible"] in (True, False)
+    assert "step_time_seconds" in data["metadata"]
+
+
+def test_cli_train_output_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "training.json"
+        assert main([
+            "train",
+            "--hardware", "H100-SXM5",
+            "--model", "70B-Dense",
+            "--algorithm", "dense",
+            "--dataset-tokens", "1B",
+            "--dp", "8",
+            "--tp", "8",
+            "--output", str(path),
+        ]) == 0
+        assert path.exists()
+        data = json.loads(path.read_text())
+        assert "mfu" in data["metadata"]
+
+
+def test_cli_serve(capsys):
+    assert main([
+        "serve",
+        "--hardware", "H100-SXM5",
+        "--model", "70B-Dense",
+        "--algorithm", "dense",
+        "--arrival-rate", "2",
+        "--max-batch-size", "4",
+        "--simulation-duration", "10",
+        "--gpu-count", "8",
+    ]) == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert "requests_completed" in data["metadata"]
+    assert "ttft_p99_ms" in data["metadata"]
+
+
+def test_cli_serve_output_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "serving.json"
+        assert main([
+            "serve",
+            "--hardware", "H100-SXM5",
+            "--model", "70B-Dense",
+            "--algorithm", "dense",
+            "--arrival-rate", "2",
+            "--max-batch-size", "4",
+            "--simulation-duration", "10",
+            "--gpu-count", "8",
+            "--output", str(path),
+        ]) == 0
+        assert path.exists()
+        data = json.loads(path.read_text())
+        assert "tpot_p99_ms" in data["metadata"]
+
+
 def test_cli_compare_hardware(capsys):
     assert main([
         "compare-hardware",

@@ -37,15 +37,70 @@ def _single_result_md(result: SimulationResult) -> str:
         f"- **Cost**: ${result.cost_usd:.2f}",
         "",
     ]
+
     if result.metadata:
-        lines.append("### Metadata")
-        for key, value in result.metadata.items():
-            if isinstance(value, float):
-                lines.append(f"- **{key}**: {value:.4f}")
-            else:
-                lines.append(f"- **{key}**: {value}")
-        lines.append("")
+        strategy = result.metadata.get("strategy")
+        if strategy in ("pretrain", "sft", "rlhf", "dpo", "grpo"):
+            lines.extend(_training_metadata_md(result.metadata))
+        elif "requests_completed" in result.metadata:
+            lines.extend(_serving_metadata_md(result.metadata))
+        else:
+            lines.append("### Metadata")
+            for key, value in result.metadata.items():
+                if isinstance(value, float):
+                    lines.append(f"- **{key}**: {value:.4f}")
+                else:
+                    lines.append(f"- **{key}**: {value}")
+            lines.append("")
     return "\n".join(lines)
+
+
+def _training_metadata_md(metadata: dict) -> List[str]:
+    lines = ["### Training Metrics", ""]
+    keys = [
+        ("strategy", "Strategy"),
+        ("steps", "Steps"),
+        ("step_time_seconds", "Step Time (s)"),
+        ("compute_time_seconds", "Compute Time (s)"),
+        ("communication_time_seconds", "Communication Time (s)"),
+        ("total_flops", "Total FLOPs"),
+        ("mfu", "MFU"),
+        ("memory_per_gpu_gb", "Memory per GPU (GB)"),
+    ]
+    for key, label in keys:
+        if key in metadata:
+            value = metadata[key]
+            if isinstance(value, float):
+                lines.append(f"- **{label}**: {value:,.4f}")
+            else:
+                lines.append(f"- **{label}**: {value}")
+    lines.append("")
+    return lines
+
+
+def _serving_metadata_md(metadata: dict) -> List[str]:
+    lines = ["### Inference Serving Metrics", ""]
+    keys = [
+        ("requests_total", "Total Requests"),
+        ("requests_completed", "Completed"),
+        ("requests_dropped", "Dropped"),
+        ("throughput_req_per_sec", "Throughput (req/s)"),
+        ("throughput_tok_per_sec", "Throughput (tok/s)"),
+        ("ttft_p50_ms", "TTFT p50 (ms)"),
+        ("ttft_p99_ms", "TTFT p99 (ms)"),
+        ("tpot_p50_ms", "TPOT p50 (ms)"),
+        ("tpot_p99_ms", "TPOT p99 (ms)"),
+        ("e2e_latency_p99_ms", "E2E Latency p99 (ms)"),
+    ]
+    for key, label in keys:
+        if key in metadata:
+            value = metadata[key]
+            if isinstance(value, float):
+                lines.append(f"- **{label}**: {value:,.2f}")
+            else:
+                lines.append(f"- **{label}**: {value}")
+    lines.append("")
+    return lines
 
 
 def _comparison_table(results: List[SimulationResult]) -> str:

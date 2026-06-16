@@ -1,5 +1,6 @@
 """Model presets from 70B dense to 30T MoE."""
 
+from ..algorithms.families import DENSE, MOE
 from .base import ModelSpec
 
 MODEL_PRESETS = [
@@ -14,6 +15,7 @@ MODEL_PRESETS = [
         vocab_size=150000,
         architecture="dense",
         context_len_default=32768,
+        algorithm_family=DENSE,
     ),
     ModelSpec(
         name="300B-Dense",
@@ -26,6 +28,7 @@ MODEL_PRESETS = [
         vocab_size=150000,
         architecture="dense",
         context_len_default=32768,
+        algorithm_family=DENSE,
     ),
     ModelSpec(
         name="1T-Dense",
@@ -38,6 +41,7 @@ MODEL_PRESETS = [
         vocab_size=200000,
         architecture="dense",
         context_len_default=32768,
+        algorithm_family=DENSE,
     ),
     ModelSpec(
         name="1T-MoE",
@@ -52,6 +56,7 @@ MODEL_PRESETS = [
         vocab_size=200000,
         architecture="moe",
         context_len_default=32768,
+        algorithm_family=MOE,
     ),
     ModelSpec(
         name="10T-MoE",
@@ -66,6 +71,7 @@ MODEL_PRESETS = [
         vocab_size=200000,
         architecture="moe",
         context_len_default=131072,
+        algorithm_family=MOE,
     ),
     ModelSpec(
         name="30T-MoE",
@@ -80,6 +86,7 @@ MODEL_PRESETS = [
         vocab_size=200000,
         architecture="moe",
         context_len_default=131072,
+        algorithm_family=MOE,
     ),
 ]
 
