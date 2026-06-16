@@ -1,0 +1,76 @@
+"""Google TPU presets: current (v5e, v5p, v6e/Trillium) and future (v7)."""
+
+from .base import HardwareSpec
+
+GOOGLE_HARDWARE = [
+    # Current generation
+    HardwareSpec(
+        name="TPU-v5e",
+        vendor="google",
+        kind="tpu",
+        memory_gb=16.0,
+        memory_bw_tb_s=0.8,
+        fp16_tflops=200.0,
+        fp8_tflops=400.0,
+        fp4_tflops=0.0,
+        interconnect_bw_gb_s=0.0,
+        pcie_bw_gb_s=0.0,
+        power_w=150.0,
+        cost_per_hour=0.8,
+        release_year=2023,
+        notes="Edge/scale-out TPU; BF16 primary",
+    ),
+    HardwareSpec(
+        name="TPU-v5p",
+        vendor="google",
+        kind="tpu",
+        memory_gb=95.0,
+        memory_bw_tb_s=2.7,
+        fp16_tflops=459.0,
+        fp8_tflops=918.0,
+        fp4_tflops=0.0,
+        interconnect_bw_gb_s=0.0,
+        pcie_bw_gb_s=0.0,
+        power_w=250.0,
+        cost_per_hour=2.0,
+        release_year=2023,
+        notes="Pod-scale TPU v5; ICI interconnect",
+    ),
+    HardwareSpec(
+        name="TPU-v6e",
+        vendor="google",
+        kind="tpu",
+        memory_gb=32.0,
+        memory_bw_tb_s=1.6,
+        fp16_tflops=1000.0,
+        fp8_tflops=2000.0,
+        fp4_tflops=4000.0,
+        interconnect_bw_gb_s=0.0,
+        pcie_bw_gb_s=0.0,
+        power_w=200.0,
+        cost_per_hour=1.5,
+        release_year=2024,
+        notes="Trillium generation; estimated",
+    ),
+    # Future generation
+    HardwareSpec(
+        name="TPU-v7",
+        vendor="google",
+        kind="tpu",
+        memory_gb=128.0,
+        memory_bw_tb_s=4.0,
+        fp16_tflops=4000.0,
+        fp8_tflops=8000.0,
+        fp4_tflops=16000.0,
+        interconnect_bw_gb_s=0.0,
+        pcie_bw_gb_s=0.0,
+        power_w=400.0,
+        cost_per_hour=3.0,
+        release_year=2027,
+        is_future=True,
+        uncertainty_range=0.35,
+        notes="Future TPU generation; estimated",
+    ),
+]
+
+__all__ = ["GOOGLE_HARDWARE"]

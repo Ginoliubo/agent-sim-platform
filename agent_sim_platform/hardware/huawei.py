@@ -1,0 +1,80 @@
+"""Huawei Ascend NPU presets: current (910B) and future (950, 960, 970)."""
+
+from .base import HardwareSpec
+
+HUAWEI_HARDWARE = [
+    # Current generation
+    HardwareSpec(
+        name="Ascend-910B",
+        vendor="huawei",
+        kind="npu",
+        memory_gb=64.0,
+        memory_bw_tb_s=1.6,
+        fp16_tflops=320.0,
+        fp8_tflops=640.0,
+        fp4_tflops=0.0,
+        interconnect_bw_gb_s=400.0,  # HCCS
+        pcie_bw_gb_s=64.0,
+        power_w=400.0,
+        cost_per_hour=2.0,
+        release_year=2023,
+        notes="Da Vinci architecture; CANN/HCCL stack",
+    ),
+    # Future generation
+    HardwareSpec(
+        name="Ascend-950",
+        vendor="huawei",
+        kind="npu",
+        memory_gb=192.0,
+        memory_bw_tb_s=4.0,
+        fp16_tflops=1500.0,
+        fp8_tflops=3000.0,
+        fp4_tflops=6000.0,
+        interconnect_bw_gb_s=800.0,
+        pcie_bw_gb_s=128.0,
+        power_w=800.0,
+        cost_per_hour=4.0,
+        release_year=2027,
+        is_future=True,
+        uncertainty_range=0.25,
+        notes="Next-gen Ascend, estimated",
+    ),
+    HardwareSpec(
+        name="Ascend-960",
+        vendor="huawei",
+        kind="npu",
+        memory_gb=384.0,
+        memory_bw_tb_s=8.0,
+        fp16_tflops=4000.0,
+        fp8_tflops=8000.0,
+        fp4_tflops=16000.0,
+        interconnect_bw_gb_s=1600.0,
+        pcie_bw_gb_s=256.0,
+        power_w=1200.0,
+        cost_per_hour=7.0,
+        release_year=2028,
+        is_future=True,
+        uncertainty_range=0.30,
+        notes="Next-gen Ascend, estimated",
+    ),
+    HardwareSpec(
+        name="Ascend-970",
+        vendor="huawei",
+        kind="npu",
+        memory_gb=768.0,
+        memory_bw_tb_s=16.0,
+        fp16_tflops=10000.0,
+        fp8_tflops=20000.0,
+        fp4_tflops=40000.0,
+        interconnect_bw_gb_s=3200.0,
+        pcie_bw_gb_s=512.0,
+        power_w=1800.0,
+        cost_per_hour=12.0,
+        release_year=2030,
+        is_future=True,
+        uncertainty_range=0.35,
+        notes="Next-gen Ascend, estimated; CloudMatrix evolution",
+    ),
+]
+
+__all__ = ["HUAWEI_HARDWARE"]
