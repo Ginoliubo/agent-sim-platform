@@ -154,6 +154,7 @@ agent_sim_platform/
 - [Benchmarks](docs/benchmarks.md)
 - [Calibration](docs/calibration.md)
 - [Profiling](docs/profiling.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Running Tests
 
