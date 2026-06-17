@@ -29,7 +29,7 @@ class CapacityEstimator:
         self.total_gpus = tp * pp
 
     def weight_memory_gb(self) -> float:
-        """Model weight memory in GB."""
+        """Model weight memory in GB. Capacity estimator uses total weight for a conservative bound."""
         return self.model.weight_memory_gb(self.precision)
 
     def kv_memory_gb(self, context_tokens: int) -> float:
@@ -64,8 +64,13 @@ class CapacityEstimator:
         )
         return flops / effective_flops
 
-    def decode_latency_per_token_seconds(self) -> float:
-        """Decode latency for one token."""
+    def decode_latency_per_token_seconds(self, batch_size: int = 8) -> float:
+        """Decode latency for one token.
+
+        In continuous batching the model weights are read once per decode step and
+        amortized across the batch, so the effective per-token memory time drops
+        as batch_size grows.  We default to 8 as a representative inference batch.
+        """
         flops = 2 * self.model.active_params_b * 1e9
         effective_compute = (
             self.hardware.effective_flops(self.precision, sim_config.DEFAULT_DECODE_UTILIZATION)
@@ -78,9 +83,8 @@ class CapacityEstimator:
             + self.model.kv_bytes_per_token(self.kv_precision)
         )
         effective_bw = self.hardware.memory_bw_bytes_s() * sim_config.DEFAULT_DECODE_UTILIZATION * self.total_gpus
-        # Weight is read once per batch and amortized; capacity estimator assumes
-        # batch_size=1 so weight+KV are both per-token for a conservative bound.
-        memory_time = bytes_per_token / effective_bw
+        # Weight is read once per step; amortize over the decode batch.
+        memory_time = bytes_per_token / (effective_bw * max(1, batch_size))
 
         return max(compute_time, memory_time)
 

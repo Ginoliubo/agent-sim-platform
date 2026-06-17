@@ -121,7 +121,12 @@ class InferenceServingEngine:
 
         self.bytes_per_param = model.bytes_per_param(self.precision)
         self.kv_bytes_per_token = model.kv_bytes_per_token(self.kv_precision)
-        self.weight_memory_gb = model.weight_memory_gb(self.precision)
+        # MoE inference only loads active experts; use active weight footprint.
+        self.weight_memory_gb = (
+            model.active_weight_memory_gb(self.precision)
+            if model.is_moe
+            else model.weight_memory_gb(self.precision)
+        )
 
         # PD / AFD configs
         self.pd_config = service_config.pd_config or PDConfig()
@@ -143,6 +148,13 @@ class InferenceServingEngine:
         group_size = max(1, self.tp * self.pp * self.cp)
         self.prefill_instances = max(1, self._prefill_gpu_count() // group_size)
         self.decode_instances = max(1, self._decode_gpu_count() // group_size)
+
+        # Dynamic KV offload hit rates based on expected working set
+        self.optimization.configure_kv_hit_rates(
+            context_tokens=self.service_config.request_length_mean,
+            batch_size=max(1, self.service_config.max_batch_size),
+            kv_bytes_per_token=self.kv_bytes_per_token,
+        )
 
         # Derived timing constants
         self.prefill_time_per_token = self._compute_prefill_time_per_token()
@@ -206,6 +218,27 @@ class InferenceServingEngine:
                 f"Requested parallelism needs {self.gpu_count} GPUs, exceeding cluster "
                 f"{self.cluster.name} capacity ({self.cluster.total_gpus})"
             )
+
+        # Auto-scale context parallelism for AFD if the per-request footprint
+        # overflows HBM and the caller did not explicitly request a CP size.
+        # AFD fixtures often leave CP at default and need CP to fit long-context
+        # MoE weights; PD fixtures typically specify enough parallelism already.
+        if self.cp == 1 and self.afd_config.enabled:
+            max_context = (
+                self.service_config.request_length_mean + self.service_config.output_length_mean
+            )
+            min_instances = 2
+            base_group = max(1, self.tp * self.pp)
+            pool_size = min(self._prefill_gpu_count(), self._decode_gpu_count())
+            for _ in range(6):
+                if self._fits_in_cluster(
+                    max_context, batch_size=self.service_config.max_batch_size
+                ):
+                    break
+                next_cp = self.cp * 2
+                if pool_size > 0 and next_cp > pool_size // (base_group * min_instances):
+                    break
+                self.cp = next_cp
 
     def _replace_pd(self, **kwargs) -> PDConfig:
         """Return a new PDConfig with updated fields."""

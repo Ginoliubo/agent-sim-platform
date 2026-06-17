@@ -27,9 +27,6 @@ config:
   output_length_std: 1024
   simulation_duration_seconds: 60.0
   decode_overhead_ms: 14.73
-  tp: 8
-  pp: 4
-  cp: 4
 observed_metrics:
   throughput_req_per_sec: 5.0
   throughput_tok_per_sec: 170000.0

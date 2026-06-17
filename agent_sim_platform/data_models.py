@@ -370,6 +370,54 @@ class OptimizationConfig:
         """Combined decode speedup factor."""
         return self.spec_decode_speedup * self.continuous_batching_efficiency
 
+    def configure_kv_hit_rates(
+        self, context_tokens: int, batch_size: int, kv_bytes_per_token: float
+    ) -> None:
+        """Dynamically assign hit rates to KV offload tiers based on capacity.
+
+        The working set size is context_tokens * batch_size * compressed KV bytes.
+        We greedily fill the fastest tiers first; anything that does not fit spills
+        to the next tier.  Prefix caching is applied as a flat hit-rate boost to
+        the GPU HBM tier (capped so total hit rate stays <= 1.0).
+        """
+        if not self.kv_offload.tiers:
+            return
+
+        compressed_kv_bytes = kv_bytes_per_token * self.kv_bytes_per_token(1.0)
+        total_kv_gb = (
+            context_tokens * batch_size * compressed_kv_bytes / (1024 ** 3)
+        )
+
+        # Reset hit rates
+        for tier in self.kv_offload.tiers:
+            tier.hit_rate = 0.0
+
+        remaining_gb = total_kv_gb
+        for tier in self.kv_offload.tiers:
+            if remaining_gb <= 0:
+                break
+            fit_gb = min(remaining_gb, tier.capacity_gb)
+            tier.hit_rate = fit_gb / total_kv_gb if total_kv_gb > 0 else 0.0
+            remaining_gb -= fit_gb
+
+        # Apply prefix caching as a hit-rate shift toward HBM
+        if self.prefix_caching and self.kv_offload.tiers:
+            hbm_tier = self.kv_offload.tiers[0]
+            boost = min(
+                self.prefix_caching_hit_rate,
+                1.0 - hbm_tier.hit_rate,
+            )
+            if boost > 0:
+                # Reduce slowest non-zero tier to keep total <= 1.0
+                for tier in reversed(self.kv_offload.tiers):
+                    if tier.hit_rate > 0 and tier is not hbm_tier:
+                        reduction = min(boost, tier.hit_rate)
+                        tier.hit_rate -= reduction
+                        hbm_tier.hit_rate += reduction
+                        boost -= reduction
+                        if boost <= 1e-9:
+                            break
+
     def kv_bytes_per_token(self, base_kv_bytes: float) -> float:
         """KV bytes after compression."""
         return base_kv_bytes * self.kv_compression_ratio
