@@ -82,6 +82,22 @@ NVIDIA_HARDWARE = [
         release_year=2024,
         notes="Blackwell generation; FP4 native",
     ),
+    HardwareSpec(
+        name="H200",
+        vendor="nvidia",
+        kind="gpu",
+        memory_gb=141.0,
+        memory_bw_tb_s=4.8,
+        fp16_tflops=989.0,
+        fp8_tflops=1979.0,
+        fp4_tflops=0.0,
+        interconnect_bw_gb_s=900.0,
+        pcie_bw_gb_s=128.0,
+        power_w=700.0,
+        cost_per_hour=4.0,
+        release_year=2024,
+        notes="Hopper refresh with HBM3e; 141 GB memory",
+    ),
     # Future generation
     HardwareSpec(
         name="Rubin",

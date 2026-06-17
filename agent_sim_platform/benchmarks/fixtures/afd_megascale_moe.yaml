@@ -1,0 +1,48 @@
+name: afd_megascale_moe
+domain: serving
+source: "MegaScale-Infer: Serving Mixture-of-Experts at Scale with Disaggregated Expert Parallelism"
+source_url: "https://arxiv.org/abs/2504.02263"
+hardware_names:
+  - H100-SXM5
+model_name: 1T-MoE
+algorithm_name: moe
+config:
+  arrival_rate_per_sec: 5.0
+  arrival_distribution: poisson
+  target_ttft_ms: 3000.0
+  target_tpot_ms: 80.0
+  max_batch_size: 32
+  max_queue_len: 64
+  prefill_decode_disaggregation: false
+  afd_config:
+    enabled: true
+    attention_gpu_count: 32
+    ffn_gpu_count: 64
+    decode_gpu_count: 32
+    activation_transfer_bw_gb_s: 200.0
+    activation_transfer_latency_us: 10.0
+  request_length_mean: 32768
+  request_length_std: 8192
+  output_length_mean: 2048
+  output_length_std: 1024
+  simulation_duration_seconds: 60.0
+  decode_overhead_ms: 14.73
+  tp: 8
+  pp: 4
+  cp: 4
+observed_metrics:
+  throughput_req_per_sec: 5.0
+  throughput_tok_per_sec: 170000.0
+  ttft_p50_ms: 500.0
+  ttft_p99_ms: 1200.0
+  tpot_p50_ms: 15.0
+  tpot_p99_ms: 30.0
+  requests_dropped: 0
+tolerance:
+  mape: 0.50
+  throughput_mape: 0.50
+  latency_mape: 0.60
+notes: >
+  MegaScale-Infer disaggregates attention and FFN/experts for MoE models,
+  enabling independent scaling. Fixture models 128-GPU AFD cluster with
+  attention-FFN activation transfer overhead.

@@ -4,10 +4,11 @@ from typing import Dict, List
 
 from .base import WorkloadSpec
 from .claude_code import CLAUDE_CODE_WORKLOAD
+from .massive_refactor import MASSIVE_REFACTOR_WORKLOAD
 from .multi_agent import MULTI_AGENT_WORKLOAD
 from .swe_agent import SWE_AGENT_WORKLOAD
 
-WORKLOAD_PRESETS = [SWE_AGENT_WORKLOAD, CLAUDE_CODE_WORKLOAD, MULTI_AGENT_WORKLOAD]
+WORKLOAD_PRESETS = [SWE_AGENT_WORKLOAD, CLAUDE_CODE_WORKLOAD, MULTI_AGENT_WORKLOAD, MASSIVE_REFACTOR_WORKLOAD]
 
 
 class WorkloadRegistry:

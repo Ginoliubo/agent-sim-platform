@@ -1,6 +1,11 @@
 """Simulation engine, runner, sweep, capacity, training, and inference serving."""
 
 from .capacity import CapacityEstimator
+from .cluster_capacity import (
+    ClusterCapacityEstimator,
+    ClusterCapacityResult,
+    estimate_cluster_capacity,
+)
 from .engine import SimulationEngine, run_simulation
 from .inference_serving import InferenceServingEngine, run_serving
 from .runner import run_batch, run_single, summarize_results
@@ -17,6 +22,9 @@ __all__ = [
     "sweep_from_names",
     "sweep_to_dict",
     "CapacityEstimator",
+    "ClusterCapacityEstimator",
+    "ClusterCapacityResult",
+    "estimate_cluster_capacity",
     "TrainingEngine",
     "run_training",
     "InferenceServingEngine",

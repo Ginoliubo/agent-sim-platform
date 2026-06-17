@@ -1,0 +1,25 @@
+name: deepseek_v3_mla
+domain: capacity
+source: "DeepSeek-V3 Technical Report"
+source_url: "https://arxiv.org/abs/2412.19437"
+hardware_names:
+  - H100-SXM5
+  - H200
+model_name: 1T-MoE-MLA
+algorithm_name: mla
+config:
+  tp: 8
+  pp: 4
+  batch_size: 1
+  context_tokens: 10000000
+observed_metrics:
+  memory_required_gb: 48.0
+  decode_latency_per_token_s: 0.00008
+tolerance:
+  mape: 0.40
+  memory_mape: 0.30
+  latency_mape: 0.50
+notes: >
+  DeepSeek-V3 uses Multi-Head Latent Attention (MLA) to compress KV cache
+  by ~93% compared to standard GQA. Fixture validates MoE-MLA memory and
+  latency estimates at 10M context.

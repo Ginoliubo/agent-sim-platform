@@ -20,7 +20,7 @@ MOE = AlgorithmFamily(
     kv_scaling="per_token",
     flops_per_token_forward_multiplier=1.0,
     flops_per_token_backward_multiplier=2.0,
-    activation_overhead_factor=1.1,  # routing overhead
+    activation_overhead_factor=1.1,
     notes="Mixture-of-Experts: active parameters used for FLOPs, total parameters for weights.",
 )
 
@@ -43,8 +43,20 @@ LINEAR_ATTENTION = AlgorithmFamily(
     flops_per_token_forward_multiplier=1.0,
     flops_per_token_backward_multiplier=2.0,
     activation_overhead_factor=1.1,
-    default_kv_compression_ratio=0.25,  # kernelized attention stores smaller state
+    default_kv_compression_ratio=0.25,
     notes="Kernelized linear attention: O(n) complexity, compressed KV state.",
+)
+
+MLA = AlgorithmFamily(
+    name="mla",
+    attention_complexity="quadratic",
+    has_kv_cache=True,
+    kv_scaling="compressed",
+    flops_per_token_forward_multiplier=1.0,
+    flops_per_token_backward_multiplier=2.0,
+    activation_overhead_factor=1.05,
+    default_kv_compression_ratio=0.025,
+    notes="Multi-Head Latent Attention (DeepSeek-V3 style): ~40x KV cache reduction vs dense GQA.",
 )
 
 RING_ATTENTION = AlgorithmFamily(
@@ -58,13 +70,14 @@ RING_ATTENTION = AlgorithmFamily(
     notes="Ring Attention with sequence parallelism: KV distributed across devices in chunks.",
 )
 
-ALGORITHM_FAMILIES = [DENSE, MOE, MAMBA, LINEAR_ATTENTION, RING_ATTENTION]
+ALGORITHM_FAMILIES = [DENSE, MOE, MAMBA, LINEAR_ATTENTION, MLA, RING_ATTENTION]
 
 __all__ = [
     "DENSE",
     "MOE",
     "MAMBA",
     "LINEAR_ATTENTION",
+    "MLA",
     "RING_ATTENTION",
     "ALGORITHM_FAMILIES",
 ]

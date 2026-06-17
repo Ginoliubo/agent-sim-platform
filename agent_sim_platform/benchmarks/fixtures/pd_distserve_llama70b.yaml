@@ -1,0 +1,46 @@
+name: pd_distserve_llama70b
+domain: serving
+source: "DistServe: Disaggregating Prefill and Decoding for Goodput-optimized LLM Serving"
+source_url: "https://arxiv.org/abs/2408.15950"
+hardware_names:
+  - H100-SXM5
+model_name: 70B-Dense
+algorithm_name: dense
+config:
+  arrival_rate_per_sec: 5.0
+  arrival_distribution: poisson
+  target_ttft_ms: 2000.0
+  target_tpot_ms: 50.0
+  max_batch_size: 32
+  max_queue_len: 32
+  prefill_decode_disaggregation: true
+  pd_config:
+    enabled: true
+    prefill_gpu_count: 4
+    decode_gpu_count: 4
+    kv_transfer_bw_gb_s: 400.0
+    kv_transfer_latency_us: 10.0
+    transfer_chunk_size_mb: 64.0
+    async_prefetch: false
+  request_length_mean: 4096
+  request_length_std: 2048
+  output_length_mean: 512
+  output_length_std: 256
+  simulation_duration_seconds: 60.0
+  decode_overhead_ms: 3.85
+observed_metrics:
+  throughput_req_per_sec: 5.0
+  throughput_tok_per_sec: 23000.0
+  ttft_p50_ms: 180.0
+  ttft_p99_ms: 450.0
+  tpot_p50_ms: 4.5
+  tpot_p99_ms: 9.0
+  requests_dropped: 0
+tolerance:
+  mape: 0.35
+  throughput_mape: 0.35
+  latency_mape: 0.45
+notes: >
+  DistServe reports PD disaggregation improves TPOT by ~1.2-1.4x over colocated
+  serving on 8xH100, with KV transfer overhead adding ~5-10% to TTFT.
+  Observed values are normalized for FP8 continuous batching.

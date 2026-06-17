@@ -15,6 +15,96 @@ def test_cli_help():
     assert exc.value.code == 0
 
 
+def test_cli_list_topologies(capsys):
+    assert main(["list-topologies"]) == 0
+    captured = capsys.readouterr()
+    assert "nvlink-domain-8" in captured.out
+    assert "rail-optimized" in captured.out
+
+
+def test_cli_list_clusters(capsys):
+    assert main(["list-clusters"]) == 0
+    captured = capsys.readouterr()
+    assert "fat-tree-256-h100" in captured.out
+
+
+def test_cli_cluster_capacity(capsys):
+    assert main([
+        "cluster-capacity",
+        "--hardware", "B200",
+        "--model", "1T-Dense",
+        "--cluster", "fat-tree-1024-h100",
+        "--context", "10M",
+        "--optimization", "layer3",
+    ]) == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["feasible"] is True
+    assert data["gpu_count"] > 1
+    assert "cp_comm_time_ms" in data["metadata"]
+
+
+def test_cli_serve_distributed(capsys):
+    assert main([
+        "serve",
+        "--hardware", "B200",
+        "--model", "1T-Dense",
+        "--algorithm", "dense",
+        "--cluster", "fat-tree-1024-h100",
+        "--tp", "8",
+        "--pp", "4",
+        "--cp", "64",
+        "--request-length-mean", "10000000",
+        "--output-length-mean", "1000",
+        "--arrival-rate", "1",
+        "--max-batch-size", "1",
+        "--simulation-duration", "1",
+        "--optimization", "layer3",
+    ]) == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert "cp_comm_time_ms" in data["metadata"]
+    assert data["metadata"]["tp"] == 8
+    assert data["metadata"]["pp"] == 4
+    assert data["metadata"]["cp"] == 64
+
+
+def test_cli_list_offload_tiers(capsys):
+    assert main(["list-offload-tiers"]) == 0
+    captured = capsys.readouterr()
+    assert "gpu_hbm" in captured.out
+    assert "icms" in captured.out
+
+
+def test_cli_serve_pd_kv_offload(capsys):
+    assert main([
+        "serve",
+        "--hardware", "B200",
+        "--model", "1T-MoE-MLA",
+        "--algorithm", "mla",
+        "--cluster", "fat-tree-1024-h100",
+        "--tp", "8",
+        "--pp", "4",
+        "--cp", "32",
+        "--pd-enabled",
+        "--prefill-gpus", "512",
+        "--decode-gpus", "512",
+        "--kv-transfer-bw", "200",
+        "--kv-offload-tiers", "mooncake-like",
+        "--optimization", "layer3",
+        "--request-length-mean", "10000000",
+        "--output-length-mean", "1000",
+        "--arrival-rate", "1",
+        "--max-batch-size", "1",
+        "--simulation-duration", "1",
+    ]) == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["feasible"] is True
+    assert data["metadata"]["pd_enabled"] is True
+    assert data["metadata"]["kv_transfer_time_per_request_ms"] > 0
+
+
 def test_cli_list_hardware(capsys):
     assert main(["list-hardware"]) == 0
     captured = capsys.readouterr()

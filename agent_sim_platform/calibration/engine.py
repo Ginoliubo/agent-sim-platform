@@ -5,14 +5,17 @@ from typing import Dict, List, Optional, Tuple
 
 from ..algorithms import DEFAULT_REGISTRY as ALGORITHM_REGISTRY
 from ..data_models import (
+    AFDConfig,
     BenchmarkCase,
     CalibrationConfig,
     InferenceServiceConfig,
     OptimizationConfig,
+    PDConfig,
     ParallelismConfig,
     TrainingConfig,
 )
 from ..hardware import DEFAULT_REGISTRY as HW_REGISTRY
+from ..hardware import DEFAULT_CLUSTER_REGISTRY, ClusterSpec
 from ..models import DEFAULT_REGISTRY as MODEL_REGISTRY
 from ..simulation import run_serving, run_training
 from ..simulation.capacity import CapacityEstimator
@@ -53,6 +56,13 @@ class CalibrationEngine:
             model = replace(model, algorithm_family=algorithm)
 
         optimization = OptimizationConfig(name="calibration")
+        # Apply fixture-level optimization overrides (e.g. empirical overheads)
+        opt_overrides_from_fixture = {}
+        for key in ("prefill_overhead_ms", "decode_overhead_ms"):
+            if key in fixture.config:
+                opt_overrides_from_fixture[key] = fixture.config[key]
+        if opt_overrides_from_fixture:
+            optimization = replace(optimization, **opt_overrides_from_fixture)
         model, optimization = apply_per_fixture_overrides(
             model, optimization, overrides
         )
@@ -68,6 +78,78 @@ class CalibrationEngine:
         if "mfu_target" in overrides:
             cfg_dict["mfu_target"] = overrides["mfu_target"]
         return TrainingConfig(**cfg_dict)
+
+    def _build_service_config(self, fixture: BenchmarkCase) -> InferenceServiceConfig:
+        """Build InferenceServiceConfig from fixture, handling nested PD/AFD dicts."""
+        cfg_dict = dict(fixture.config)
+        # Remove keys consumed by parallelism / cluster / calibration resolution,
+        # not by InferenceServiceConfig.
+        for key in ("tp", "pp", "cp", "gpu_count", "cluster", "decode_overhead_ms", "prefill_overhead_ms"):
+            cfg_dict.pop(key, None)
+        pd_cfg = cfg_dict.pop("pd_config", None)
+        if isinstance(pd_cfg, dict):
+            cfg_dict["pd_config"] = PDConfig(**pd_cfg)
+        afd_cfg = cfg_dict.pop("afd_config", None)
+        if isinstance(afd_cfg, dict):
+            cfg_dict["afd_config"] = AFDConfig(**afd_cfg)
+        return InferenceServiceConfig(**cfg_dict)
+
+    def _resolve_serving_kwargs(self, fixture: BenchmarkCase) -> Dict[str, object]:
+        """Infer GPU count, cluster, and parallelism for a serving fixture."""
+        cfg = dict(fixture.config)
+        kwargs: Dict[str, object] = {}
+
+        # Cluster
+        cluster_name = cfg.get("cluster")
+        if cluster_name:
+            kwargs["cluster"] = DEFAULT_CLUSTER_REGISTRY.get(cluster_name)
+
+        # Determine total GPU count from explicit config or PD/AFD pools
+        gpu_count = cfg.get("gpu_count")
+        pd_cfg = cfg.get("pd_config")
+        afd_cfg = cfg.get("afd_config")
+        pool_total = 0
+        if gpu_count is None and isinstance(pd_cfg, dict) and pd_cfg.get("enabled"):
+            pool_total = pd_cfg.get("prefill_gpu_count", 0) + pd_cfg.get("decode_gpu_count", 0)
+        if gpu_count is None and isinstance(afd_cfg, dict) and afd_cfg.get("enabled"):
+            pool_total = (
+                afd_cfg.get("attention_gpu_count", 0)
+                + afd_cfg.get("ffn_gpu_count", 0)
+                + afd_cfg.get("decode_gpu_count", 0)
+            )
+        if gpu_count is None and pool_total > 0:
+            gpu_count = pool_total
+        if gpu_count:
+            kwargs["gpu_count"] = int(gpu_count)
+
+        # Parallelism: prefer explicit config.
+        # For PD/AFD pools, infer a plausible (tp, pp, cp) split so that
+        # tp*pp*cp == pool_total and memory/communication are shardable.
+        model = MODEL_REGISTRY.get(fixture.model_name)
+        tp = cfg.get("tp")
+        pp = cfg.get("pp")
+        cp = cfg.get("cp")
+        if tp is None or pp is None or cp is None:
+            if pool_total > 0:
+                tp, pp, cp = self._infer_parallelism_for_pool(pool_total)
+            else:
+                tp = 8 if model.total_params_b >= 30 else 1
+                pp = 1
+                cp = 1
+        kwargs.update({"tp": int(tp), "pp": int(pp), "cp": int(cp)})
+
+        return kwargs
+
+    @staticmethod
+    def _infer_parallelism_for_pool(pool_total: int) -> Tuple[int, int, int]:
+        """Infer tp/pp/cp for one disaggregated pool.
+
+        Prefer a small per-request footprint (TP-only) so that multiple requests
+        can run data-parallel inside the pool.  CP/PP are left at 1; the caller
+        scales by running multiple instances of this (tp,pp,cp) group.
+        """
+        tp = min(8, max(1, pool_total))
+        return tp, 1, 1
 
     def _extract_predicted_metrics(
         self, fixture: BenchmarkCase, result
@@ -111,12 +193,14 @@ class CalibrationEngine:
                 training_config = self._build_training_config(fixture, overrides)
                 result = run_training(model, hardware, training_config)
             elif fixture.domain == "serving":
-                service_config = InferenceServiceConfig(**fixture.config)
+                service_config = self._build_service_config(fixture)
+                serving_kwargs = self._resolve_serving_kwargs(fixture)
                 result = run_serving(
                     model,
                     hardware,
                     service_config,
                     optimization=optimization,
+                    **serving_kwargs,
                 )
             elif fixture.domain == "capacity":
                 cfg = dict(fixture.config)

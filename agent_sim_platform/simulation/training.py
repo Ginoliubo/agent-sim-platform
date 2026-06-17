@@ -19,6 +19,7 @@ from ..data_models import (
     TrainingConfig,
     WorkloadSpec,
 )
+from ..hardware import ClusterSpec
 from ..utils.units import gb_to_bytes
 
 
@@ -42,6 +43,8 @@ class TrainingEngine:
     """Simulate a distributed training job.
 
     Models compute, communication, and memory for transformer-based training.
+    Supports topology-aware communication estimates when a ClusterSpec is
+    provided.
     """
 
     def __init__(
@@ -50,12 +53,66 @@ class TrainingEngine:
         hardware: HardwareSpec,
         training_config: TrainingConfig,
         precision: str = "FP8",
+        cluster: ClusterSpec = None,
     ):
         self.model = model
         self.hardware = hardware
         self.training_config = training_config
         self.precision = precision.upper()
+        self.cluster = cluster
         self.bytes_per_param = model.bytes_per_param(self.precision)
+
+    def _gpus_per_node(self) -> int:
+        if self.cluster is None:
+            return self._estimate_gpu_count()
+        return self.cluster.gpus_per_node
+
+    def _node_count(self) -> int:
+        if self.cluster is None:
+            return 1
+        return self.cluster.node_count
+
+    def _intra_node_bw_bytes_s(self) -> float:
+        """Aggregate intra-node bandwidth in bytes/s."""
+        if self.cluster is None:
+            return self.hardware.interconnect_bw_gb_s * 1e9
+        return self.cluster.topology.intra_node_bw_gb_s * 1e9
+
+    def _inter_node_bw_bytes_s(self) -> float:
+        """Effective per-node inter-node bandwidth in bytes/s."""
+        if self.cluster is None:
+            # Fallback to hardware interconnect if no cluster topology
+            bw = self.hardware.interconnect_bw_gb_s
+            if bw <= 0:
+                bw = self.hardware.pcie_bw_gb_s
+            return bw * 1e9
+        return self.cluster.topology.effective_inter_node_bw_gb_s * 1e9
+
+    def _cross_node_fraction(self, group_size: int) -> float:
+        """Fraction of traffic that crosses node boundaries for a parallel group."""
+        gpus_per_node = self._gpus_per_node()
+        if group_size <= gpus_per_node:
+            return 0.0
+        return max(0.0, (group_size - gpus_per_node) / group_size)
+
+    def _communication_time(
+        self,
+        bytes_moved: float,
+        group_size: int,
+    ) -> float:
+        """Estimate communication time splitting intra- and inter-node traffic."""
+        if bytes_moved <= 0:
+            return 0.0
+        cross_frac = self._cross_node_fraction(group_size)
+        intra_frac = 1.0 - cross_frac
+        intra_bw = self._intra_node_bw_bytes_s()
+        inter_bw = self._inter_node_bw_bytes_s()
+        time = 0.0
+        if intra_bw > 0:
+            time += intra_frac * bytes_moved / intra_bw
+        if cross_frac > 0 and inter_bw > 0:
+            time += cross_frac * bytes_moved / inter_bw
+        return time
 
     def _memory_per_gpu_gb(self, gpu_count: int) -> float:
         """Estimate memory required per GPU in GB."""
@@ -133,7 +190,7 @@ class TrainingEngine:
     def _communication_time_per_step(
         self, gpu_count: int, compute_time: float
     ) -> float:
-        """Estimate communication time per step."""
+        """Estimate communication time per step using topology-aware bandwidth."""
         cfg = self.training_config
         parallelism = cfg.parallelism
         model_size_bytes = self.model.total_params_b * 1e9 * self.bytes_per_param
@@ -142,28 +199,18 @@ class TrainingEngine:
 
         # Data parallel gradient All-Reduce
         if parallelism.dp > 1 and cfg.zero_stage < 3:
-            # Ring all-reduce: 2*(N-1)/N * model_size
             bytes_moved = 2 * (parallelism.dp - 1) / parallelism.dp * model_size_bytes
-            # Use interconnect bandwidth if cross-node, otherwise NVLink
-            bw = self.hardware.interconnect_bw_gb_s * 1e9
-            if bw <= 0:
-                bw = self.hardware.pcie_bw_gb_s * 1e9
-            if bw > 0:
-                comm_time += bytes_moved / bw
+            comm_time += self._communication_time(bytes_moved, parallelism.dp)
 
         # Tensor parallel all-reduce per layer
         if parallelism.tp > 1:
             layer_size_bytes = model_size_bytes / self.model.n_layers
             bytes_per_layer = 2 * layer_size_bytes  # two all-reduces per layer
-            bw = self.hardware.interconnect_bw_gb_s * 1e9
-            if bw <= 0:
-                bw = self.hardware.memory_bw_bytes_s()  # fallback
-            if bw > 0:
-                comm_time += self.model.n_layers * bytes_per_layer / bw
+            bytes_moved = self.model.n_layers * bytes_per_layer
+            comm_time += self._communication_time(bytes_moved, parallelism.tp)
 
         # Pipeline parallel bubble
         if parallelism.pp > 1:
-            # Bubble ratio: (PP-1)/(num_micro_batches + PP - 1)
             num_micro_batches = max(
                 parallelism.pp * 4,
                 cfg.global_batch_size // (cfg.micro_batch_size * parallelism.dp),
@@ -180,9 +227,7 @@ class TrainingEngine:
                 * self.bytes_per_param
             )
             bytes_moved = 2 * (parallelism.ep - 1) / parallelism.ep * hidden_bytes
-            bw = self.hardware.interconnect_bw_gb_s * 1e9
-            if bw > 0:
-                comm_time += bytes_moved / bw
+            comm_time += self._communication_time(bytes_moved, parallelism.ep)
 
         return comm_time
 
@@ -268,6 +313,9 @@ class TrainingEngine:
                 "memory_per_gpu_gb": memory_per_gpu,
                 "steps": cfg.steps,
                 "strategy": cfg.strategy,
+                "cluster": self.cluster.name if self.cluster else None,
+                "node_count": self._node_count(),
+                "gpus_per_node": self._gpus_per_node(),
             },
         )
 
@@ -277,6 +325,7 @@ def run_training(
     hardware: HardwareSpec,
     training_config: TrainingConfig,
     precision: str = "FP8",
+    cluster: ClusterSpec = None,
 ) -> SimulationResult:
     """Convenience function to run a training simulation."""
-    return TrainingEngine(model, hardware, training_config, precision).run()
+    return TrainingEngine(model, hardware, training_config, precision, cluster).run()

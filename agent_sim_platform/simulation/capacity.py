@@ -78,6 +78,8 @@ class CapacityEstimator:
             + self.model.kv_bytes_per_token(self.kv_precision)
         )
         effective_bw = self.hardware.memory_bw_bytes_s() * sim_config.DEFAULT_DECODE_UTILIZATION * self.total_gpus
+        # Weight is read once per batch and amortized; capacity estimator assumes
+        # batch_size=1 so weight+KV are both per-token for a conservative bound.
         memory_time = bytes_per_token / effective_bw
 
         return max(compute_time, memory_time)
@@ -130,7 +132,7 @@ class CapacityEstimator:
             tokens_input=context_tokens,
             tokens_output=0,
             peak_kv_gb=self.kv_memory_gb(context_tokens),
-            memory_required_gb=total_memory,
+            memory_required_gb=total_memory / max(1, self.total_gpus),
             gpu_count=self.total_gpus,
             feasible=fits,
             bottleneck=bottleneck,
@@ -142,5 +144,6 @@ class CapacityEstimator:
                 "decode_tps": self.throughput_tokens_per_second(),
                 "weight_memory_gb": self.weight_memory_gb(),
                 "activation_memory_gb": self.activation_memory_gb(),
+                "memory_per_gpu_gb": total_memory / max(1, self.total_gpus),
             },
         )

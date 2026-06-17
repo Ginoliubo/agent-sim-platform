@@ -1,6 +1,6 @@
 """Model presets from 70B dense to 30T MoE."""
 
-from ..algorithms.families import DENSE, MOE
+from ..algorithms.families import DENSE, MOE, MLA
 from .base import ModelSpec
 
 MODEL_PRESETS = [
@@ -57,6 +57,21 @@ MODEL_PRESETS = [
         architecture="moe",
         context_len_default=32768,
         algorithm_family=MOE,
+    ),
+    ModelSpec(
+        name="1T-MoE-MLA",
+        total_params_b=1000,
+        active_params_b=32,
+        n_layers=160,
+        d_model=28672,
+        n_heads=224,
+        d_head=128,
+        num_experts=256,
+        top_k=8,
+        vocab_size=200000,
+        architecture="moe",
+        context_len_default=131072,
+        algorithm_family=MLA,
     ),
     ModelSpec(
         name="10T-MoE",

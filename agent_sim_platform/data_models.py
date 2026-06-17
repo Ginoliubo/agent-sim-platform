@@ -13,6 +13,72 @@ from .algorithms.base import AlgorithmFamily
 
 
 # ---------------------------------------------------------------------------
+# Network Topology
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class NetworkTopology:
+    """Immutable specification of a network interconnect topology.
+
+    Captures the bandwidth/latency characteristics that determine multi-node
+    collective communication performance. Bandwidth numbers are in GB/s.
+    """
+
+    name: str
+    topology_type: str  # "nvlink-domain" | "fat-tree" | "dragonfly+" | "rail-optimized" | "mesh"
+    gpus_per_node: int
+    intra_node_bw_gb_s: float  # Aggregate NVLink / HCCS / ICI within a node
+    inter_node_bw_gb_s: float  # Per-NIC RDMA bandwidth (IB/RoCE) out of a node
+    nics_per_node: int = 1
+    switch_latency_us: float = 1.0
+    oversubscription_ratio: float = 1.0  # 1.0 = non-blocking, >1 = contended
+    notes: str = ""
+
+    @property
+    def aggregate_inter_node_bw_gb_s(self) -> float:
+        """Aggregate outbound RDMA bandwidth per node."""
+        return self.inter_node_bw_gb_s * self.nics_per_node
+
+    @property
+    def effective_inter_node_bw_gb_s(self) -> float:
+        """Effective inter-node bandwidth after oversubscription."""
+        return self.aggregate_inter_node_bw_gb_s / max(1.0, self.oversubscription_ratio)
+
+    def is_single_node(self) -> bool:
+        """True if this topology describes only a single node."""
+        return self.topology_type == "nvlink-domain"
+
+
+@dataclass(frozen=True)
+class ClusterSpec:
+    """Immutable specification of a GPU cluster: nodes + topology."""
+
+    name: str
+    topology: NetworkTopology
+    node_count: int
+
+    @property
+    def gpus_per_node(self) -> int:
+        return self.topology.gpus_per_node
+
+    @property
+    def total_gpus(self) -> int:
+        return self.node_count * self.topology.gpus_per_node
+
+    @property
+    def is_single_node(self) -> bool:
+        return self.node_count == 1
+
+    def intra_node_gpu_count(self, gpu_count: int) -> int:
+        """Number of GPUs that can be reached at intra-node bandwidth."""
+        return min(gpu_count, self.gpus_per_node)
+
+    def inter_node_gpu_count(self, gpu_count: int) -> int:
+        """Number of GPUs that must communicate across nodes."""
+        return max(0, gpu_count - self.gpus_per_node)
+
+
+# ---------------------------------------------------------------------------
 # Hardware
 # ---------------------------------------------------------------------------
 
@@ -220,6 +286,56 @@ class AgentHarnessSpec:
 
 
 # ---------------------------------------------------------------------------
+# KV Offload Tier
+# ---------------------------------------------------------------------------
+
+@dataclass
+class KVOffloadTier:
+    """A single tier in a hierarchical KV-cache offload stack."""
+
+    name: str
+    capacity_gb: float
+    bandwidth_gb_s: float
+    latency_us: float
+    hit_rate: float = 0.0
+    notes: str = ""
+
+
+@dataclass
+class KVOffloadConfig:
+    """Hierarchical KV-cache offload configuration.
+
+    Tiers are ordered from fastest/smallest (GPU HBM) to slowest/largest
+    (SSD/CXL/remote). The sum of hit rates should not exceed 1.0; the
+    remainder is treated as a miss that must be recomputed or fetched from
+    the next tier.
+    """
+
+    tiers: List[KVOffloadTier] = field(default_factory=list)
+
+    def total_hit_rate(self) -> float:
+        return sum(t.hit_rate for t in self.tiers)
+
+    def effective_kv_access_time_s(self, kv_bytes_per_token: float) -> float:
+        """Expected KV access time per token across all tiers."""
+        time = 0.0
+        remaining = 1.0
+        for tier in self.tiers:
+            if tier.hit_rate <= 0:
+                continue
+            bw_bytes_s = tier.bandwidth_gb_s * 1e9
+            if bw_bytes_s > 0:
+                time += tier.hit_rate * (kv_bytes_per_token / bw_bytes_s + tier.latency_us * 1e-6)
+            remaining -= tier.hit_rate
+        # Remaining fraction is a miss; model as 2x slowest tier penalty
+        if remaining > 0 and self.tiers:
+            slowest = min(self.tiers, key=lambda t: t.bandwidth_gb_s)
+            bw_bytes_s = max(1.0, slowest.bandwidth_gb_s * 1e9)
+            time += remaining * (kv_bytes_per_token / bw_bytes_s + slowest.latency_us * 1e-6) * 2
+        return time
+
+
+# ---------------------------------------------------------------------------
 # Optimization
 # ---------------------------------------------------------------------------
 
@@ -238,6 +354,10 @@ class OptimizationConfig:
     hbf_offload_ratio: float = 0.0
     hbf_bw_gb_s: float = 200.0
     quantization_bits: int = 8  # model weight quantization bits
+    kv_offload: KVOffloadConfig = field(default_factory=KVOffloadConfig)
+    # Empirical per-request/per-token overheads for calibration against real systems
+    prefill_overhead_ms: float = 0.0
+    decode_overhead_ms: float = 0.0
 
     def effective_prefill_speedup(self) -> float:
         """Combined prefill speedup factor."""
@@ -253,6 +373,41 @@ class OptimizationConfig:
     def kv_bytes_per_token(self, base_kv_bytes: float) -> float:
         """KV bytes after compression."""
         return base_kv_bytes * self.kv_compression_ratio
+
+    def effective_kv_access_time_s(self, base_kv_bytes_per_token: float) -> float:
+        """Expected KV access time per token including offload tiers."""
+        kv_bytes = self.kv_bytes_per_token(base_kv_bytes_per_token)
+        return self.kv_offload.effective_kv_access_time_s(kv_bytes)
+
+
+# ---------------------------------------------------------------------------
+# Prefill-Decode (PD) and Attention-FFN-Decode (AFD) Disaggregation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PDConfig:
+    """Prefill-Decode disaggregation configuration."""
+
+    enabled: bool = False
+    prefill_gpu_count: int = 1
+    decode_gpu_count: int = 1
+    kv_transfer_bw_gb_s: float = 200.0
+    kv_transfer_latency_us: float = 10.0
+    transfer_chunk_size_mb: float = 64.0
+    async_prefetch: bool = False
+
+
+@dataclass
+class AFDConfig:
+    """Attention-FFN-Decode disaggregation configuration (future evolution of PD)."""
+
+    enabled: bool = False
+    attention_gpu_count: int = 1
+    ffn_gpu_count: int = 1
+    decode_gpu_count: int = 1
+    activation_transfer_bw_gb_s: float = 200.0
+    activation_transfer_latency_us: float = 5.0
+    notes: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +476,8 @@ class InferenceServiceConfig:
     max_batch_size: int = 128
     max_queue_len: int = 64
     prefill_decode_disaggregation: bool = False
+    pd_config: PDConfig = field(default_factory=PDConfig)
+    afd_config: AFDConfig = field(default_factory=AFDConfig)
     request_length_mean: int = 4096
     request_length_std: int = 2048
     output_length_mean: int = 512

@@ -1,0 +1,46 @@
+name: mooncake_kimi_k2
+domain: serving
+source: "Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving"
+source_url: "https://arxiv.org/abs/2407.00079"
+hardware_names:
+  - H200
+model_name: 1T-MoE-MLA
+algorithm_name: mla
+config:
+  arrival_rate_per_sec: 10.0
+  arrival_distribution: poisson
+  target_ttft_ms: 5000.0
+  target_tpot_ms: 100.0
+  max_batch_size: 64
+  max_queue_len: 128
+  prefill_decode_disaggregation: true
+  pd_config:
+    enabled: true
+    prefill_gpu_count: 64
+    decode_gpu_count: 64
+    kv_transfer_bw_gb_s: 200.0
+    kv_transfer_latency_us: 20.0
+    transfer_chunk_size_mb: 128.0
+    async_prefetch: true
+  request_length_mean: 131072
+  request_length_std: 32768
+  output_length_mean: 4096
+  output_length_std: 2048
+  simulation_duration_seconds: 60.0
+  decode_overhead_ms: 24.99
+observed_metrics:
+  throughput_req_per_sec: 10.0
+  throughput_tok_per_sec: 1350000.0
+  ttft_p50_ms: 1200.0
+  ttft_p99_ms: 3000.0
+  tpot_p50_ms: 25.0
+  tpot_p99_ms: 50.0
+  requests_dropped: 0
+tolerance:
+  mape: 0.50
+  throughput_mape: 0.50
+  latency_mape: 0.60
+notes: >
+  Mooncake powers Kimi K2 deployment on 128 H200 GPUs, reaching 224k tokens/s
+  prefill and 288k tokens/s decode. Fixture scales to 128-GPU PD cluster with
+  MoE-MLA long-context workload.
