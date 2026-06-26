@@ -15,11 +15,13 @@ Supports:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from .. import config as sim_config
+from ..calibration.residual import ResidualModel
 from ..config import FEASIBILITY_MAX_MEMORY_UTIL
 from ..data_models import (
     AFDConfig,
@@ -701,6 +703,41 @@ class InferenceServingEngine:
         # so the time to complete one decode step is independent of batch size.
         return self.decode_time_per_token
 
+    def _apply_residual_correction(
+        self, analytical_prefill_ms: float, analytical_tpot_ms: float
+    ) -> Dict[str, float]:
+        """Apply trained residual correction to analytical latency estimates.
+
+        Loads the default serving residual model if present and adjusts TTFT/TPOT
+        estimates based on workload features.  Falls back to baseline estimates
+        when no model is available.
+        """
+        default_path = Path(__file__).parent.parent / "calibration" / "data" / "residual_model_serving.json"
+        if not default_path.exists():
+            return {"ttft_p50_ms": analytical_prefill_ms, "tpot_p50_ms": analytical_tpot_ms}
+
+        try:
+            residual_model = ResidualModel.load(str(default_path))
+        except Exception:
+            return {"ttft_p50_ms": analytical_prefill_ms, "tpot_p50_ms": analytical_tpot_ms}
+
+        seq_len = max(1, self.service_config.request_length_mean)
+        features = {
+            "seq_len": seq_len,
+            "model_params_b": float(self.model.total_params_b),
+            "gpu_count": int(self.gpu_count),
+            "is_pd": bool(self.pd_config.enabled),
+            "is_afd": bool(self.afd_config.enabled),
+            "is_moe": bool(self.model.is_moe),
+            "cp": int(self.cp),
+        }
+        predicted = {
+            "ttft_p50_ms": analytical_prefill_ms,
+            "tpot_p50_ms": analytical_tpot_ms,
+        }
+        corrected = residual_model.apply("serve", features, predicted)
+        return corrected
+
     def run(self) -> SimulationResult:
         """Run event-driven inference serving simulation with pool-level parallelism."""
         cfg = self.service_config
@@ -911,6 +948,15 @@ class InferenceServingEngine:
             + self.afd_transfer_time_per_token * cfg.request_length_mean * 1000.0
         )
         analytical_tpot_ms = self.decode_time_per_token * 1000.0
+
+        # Apply trained residual correction if a default residual model exists.
+        # This is the hybrid analytical + ML step that brings TTFT/TPOT errors
+        # down to the calibrated range.
+        corrected = self._apply_residual_correction(
+            analytical_prefill_ms, analytical_tpot_ms
+        )
+        analytical_prefill_ms = corrected.get("ttft_p50_ms", analytical_prefill_ms)
+        analytical_tpot_ms = corrected.get("tpot_p50_ms", analytical_tpot_ms)
 
         return SimulationResult(
             config=sim_cfg,
