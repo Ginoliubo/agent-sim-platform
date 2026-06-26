@@ -253,10 +253,24 @@ class InferenceServingEngine:
         return AFDConfig(**data)
 
     def _prefill_gpu_count(self) -> int:
-        return self.pd_config.prefill_gpu_count if self.pd_config.enabled else self.gpu_count
+        if self.pd_config.enabled:
+            return self.pd_config.prefill_gpu_count
+        if self.afd_config.enabled:
+            return self.afd_config.attention_gpu_count + self.afd_config.ffn_gpu_count
+        return self.gpu_count
 
     def _decode_gpu_count(self) -> int:
-        return self.pd_config.decode_gpu_count if self.pd_config.enabled else self.gpu_count
+        if self.pd_config.enabled:
+            return self.pd_config.decode_gpu_count
+        if self.afd_config.enabled:
+            # AFD decode uses attention + FFN + decode pools in a pipelined
+            # fashion; the effective decode capacity is the total pool size.
+            return (
+                self.afd_config.attention_gpu_count
+                + self.afd_config.ffn_gpu_count
+                + self.afd_config.decode_gpu_count
+            )
+        return self.gpu_count
 
     def _memory_per_gpu_gb(self, context_tokens: int, batch_size: int = 1) -> float:
         """Estimate memory required per GPU for the distributed config."""
@@ -345,8 +359,10 @@ class InferenceServingEngine:
 
         if self.cp > 1:
             kv_bytes_per_token = self.kv_bytes_per_token * opt.kv_compression_ratio
-            bytes_per_layer = 2 * kv_bytes_per_token * n_layers * (self.cp - 1) / self.cp
-            comm.cp_bytes_per_token = bytes_per_layer
+            # Ring all-gather: each GPU holds 1/cp of KV; total data moved is
+            # (cp-1)/cp of the full KV cache.  kv_bytes_per_token already spans
+            # all layers, so do not multiply by n_layers again.
+            comm.cp_bytes_per_token = kv_bytes_per_token * (self.cp - 1) / self.cp
             bw = self._cp_bandwidth_bytes_s() * opt.continuous_batching_efficiency
             if bw > 0:
                 comm.cp_time_per_token_ms = (comm.cp_bytes_per_token / bw) * 1000.0
@@ -357,25 +373,194 @@ class InferenceServingEngine:
 
         return comm
 
+    def _infer_bottleneck(
+        self,
+        prefill_breakdown: Dict[str, float],
+        decode_breakdown: Dict[str, float],
+        feasible: bool,
+    ) -> str:
+        """Classify the dominant inference bottleneck from latency breakdowns."""
+        if not feasible:
+            return "memory: HBM overflow"
+
+        prefill_total = sum(prefill_breakdown.values())
+        decode_total = sum(decode_breakdown.values())
+        # We care about the steady-state bottleneck; decode usually dominates
+        # serving latency/throughput.
+        if decode_total >= prefill_total:
+            breakdown = decode_breakdown
+            phase = "decode"
+        else:
+            breakdown = prefill_breakdown
+            phase = "prefill"
+
+        # Drop components that are not the dominant path for this phase.
+        # For decode, compute/memory are alternatives (max); for prefill,
+        # MLP compute and attention are sequential.
+        if phase == "prefill":
+            dominant_compute = breakdown.get("compute", 0.0) + breakdown.get("attention", 0.0)
+        else:
+            dominant_compute = max(breakdown.get("compute", 0.0), breakdown.get("memory", 0.0))
+        comm = breakdown.get("communication", 0.0)
+        offload = breakdown.get("kv_offload", 0.0) + breakdown.get("afd_transfer", 0.0)
+        overhead = breakdown.get("overhead", 0.0)
+
+        if comm > dominant_compute and comm > offload and comm > overhead:
+            return f"network: {phase} communication bottleneck"
+        if offload > dominant_compute and offload > overhead:
+            return f"memory: {phase} offload/transfer bottleneck"
+        if overhead > dominant_compute and overhead > comm:
+            return f"software: {phase} scheduler/overhead bottleneck"
+        if phase == "decode" and breakdown.get("memory", 0.0) > breakdown.get("compute", 0.0):
+            return f"memory: {phase} bandwidth bottleneck"
+        if phase == "prefill" and breakdown.get("attention", 0.0) > breakdown.get("compute", 0.0):
+            return f"compute: {phase} attention-bound"
+        return f"compute: {phase} GPU-bound"
+
+    def _network_utilization(
+        self,
+        total_tokens: int,
+        duration: float,
+        comm: CommunicationBreakdown,
+    ) -> float:
+        """Estimate peak inter-node network bandwidth utilization (0-1)."""
+        if duration <= 0 or total_tokens <= 0:
+            return 0.0
+
+        total_comm_bytes_per_token = (
+            comm.tp_bytes_per_token + comm.pp_bytes_per_token + comm.cp_bytes_per_token
+        )
+        comm_bytes_per_sec = (total_tokens / duration) * total_comm_bytes_per_token
+
+        if self.cluster is not None:
+            total_inter_node_bw = (
+                self.cluster.topology.aggregate_inter_node_bw_gb_s
+                * self.cluster.node_count
+                * 1e9
+            )
+        else:
+            # Fallback: treat each GPU as having its own interconnect link.
+            total_inter_node_bw = self.hardware.interconnect_bw_gb_s * self.gpu_count * 1e9
+
+        if total_inter_node_bw <= 0:
+            return 0.0
+        return min(1.0, comm_bytes_per_sec / total_inter_node_bw)
+
+    def _prefill_utilization(self, seq_len: int) -> float:
+        """Sequence-length-aware prefill utilization.
+
+        Small prefill kernels (short context, small batch) suffer from CUDA
+        launch overhead, kernel scheduling gaps, and poor GEMM efficiency.
+        Utilization rises with sequence length and approaches the configured
+        ceiling for long-context prefill.  This is the structural fix behind
+        Path 2: a single global constant cannot fit both 2K and 131K contexts.
+        """
+        max_util = sim_config.DEFAULT_PREFILL_UTILIZATION
+        saturation = sim_config.DEFAULT_PREFILL_SATURATION_TOKENS
+        if saturation <= 0:
+            return max_util
+        return max_util * seq_len / (seq_len + saturation)
+
     def _compute_prefill_time_per_token(self) -> float:
         """Time to process one token during prefill (compute-bound + comm)."""
+        breakdown = self._compute_prefill_breakdown()
+        return sum(breakdown.values())
+
+    def _attention_time_per_token(self, seq_len: int) -> float:
+        """Memory/compute roofline estimate for FlashAttention-style prefill.
+
+        Models attention as either HBM-bandwidth-bound (short context) or
+        FLOP-bound (very long context).  The "passes" constant captures how
+        many times the per-layer activation is read/written from HBM; it is
+        calibrated against real serving fixtures rather than guessed.
+
+        CP parallelism reduces the effective sequence length seen by each
+        GPU; compressed KV families (MLA) reduce per-token HBM traffic.
+        """
+        passes = sim_config.DEFAULT_PREFILL_ATTENTION_HBM_PASSES
+        if passes <= 0:
+            return 0.0
+
+        n_layers = self.model.n_layers
+        d_model = self.model.d_model
+        num_gpus = self._prefill_gpu_count()
+        util = self._prefill_utilization(seq_len)
+
+        # Sequence parallelism: attention work is divided across CP group.
+        effective_seq_len = seq_len / max(1, self.cp)
+
+        # KV compression (MLA) reduces attention memory traffic.
+        kv_scale = 1.0
+        family = self.model.algorithm_family
+        if family and family.kv_scaling == "compressed":
+            kv_scale = max(0.01, family.default_kv_compression_ratio)
+
+        # FlashAttention-style kernels become more memory-efficient as the
+        # sequence length grows because each tile reuses more data.  Model this
+        # by decaying the effective HBM passes from the calibrated ceiling down
+        # to a physical floor of ~4 passes (Q, K, V, O) per layer per token.
+        min_passes = 4.0
+        saturation = sim_config.DEFAULT_PREFILL_SATURATION_TOKENS
+        if saturation > 0:
+            effective_passes = min_passes + (passes - min_passes) * saturation / (seq_len + saturation)
+        else:
+            effective_passes = passes
+
+        # Memory-bound path: each effective pass reads/writes one activation
+        # vector per layer per token.
+        hbm_bytes_per_token = (
+            effective_passes * n_layers * d_model * self.bytes_per_param * kv_scale
+        )
+        mem_time = hbm_bytes_per_token / (
+            self.hardware.memory_bw_bytes_s()
+            * max(1, num_gpus)
+            * util
+        )
+
+        # Compute-bound path: O(seq_len * d_model * n_layers) FLOPs per token.
+        flops_per_token = 2 * n_layers * d_model * effective_seq_len
+        eff_flops = self.hardware.effective_flops(self.precision, util) * max(1, num_gpus)
+        compute_time = flops_per_token / eff_flops
+
+        return max(mem_time, compute_time)
+
+    def _compute_prefill_breakdown(self) -> Dict[str, float]:
+        """Breakdown of prefill time per token into components (seconds)."""
+        seq_len = max(1, self.service_config.request_length_mean)
+        util = self._prefill_utilization(seq_len)
         flops_per_token = self.model.flops_per_token_forward()
         effective_flops = (
-            self.hardware.effective_flops(self.precision, sim_config.DEFAULT_PREFILL_UTILIZATION)
+            self.hardware.effective_flops(self.precision, util)
             * self._prefill_gpu_count()
         )
         compute_time = flops_per_token / effective_flops
 
-        seq_len = max(1, self.service_config.request_length_mean)
         comm = self._communication_breakdown(seq_len, 1, phase="prefill")
         comm_time = (
             comm.tp_time_per_token_ms + comm.pp_time_per_token_ms + comm.cp_time_per_token_ms
         ) / 1000.0
 
-        return compute_time + comm_time + self.optimization.prefill_overhead_ms / 1000.0
+        # Per-request system latency floor: scheduler, kernel launch, CUDA
+        # graph setup, PagedAttention block allocation.  Spread over the input
+        # sequence so the total contribution is constant per request.
+        floor_s = sim_config.DEFAULT_PREFILL_LATENCY_FLOOR_MS / 1000.0
+        floor_per_token = floor_s / seq_len
+
+        return {
+            "compute": compute_time,
+            "attention": self._attention_time_per_token(seq_len),
+            "communication": comm_time,
+            "floor": floor_per_token,
+            "overhead": self.optimization.prefill_overhead_ms / 1000.0,
+        }
 
     def _compute_decode_time_per_token(self) -> float:
         """Time to generate one token during decode (memory/compute-bound + comm + offload)."""
+        breakdown = self._compute_decode_breakdown()
+        return sum(breakdown.values())
+
+    def _compute_decode_breakdown(self) -> Dict[str, float]:
+        """Breakdown of decode time per token into components (seconds)."""
         flops_per_token = self.model.flops_per_token_forward()
         effective_compute = (
             self.hardware.effective_flops(self.precision, sim_config.DEFAULT_DECODE_UTILIZATION)
@@ -391,24 +576,42 @@ class InferenceServingEngine:
             * sim_config.DEFAULT_DECODE_UTILIZATION
             * self._decode_gpu_count()
         )
-        # Weight is read once per decode batch and amortized; assume average
-        # effective batch size is half of max_batch_size (conservative).
         effective_decode_batch = max(1.0, self.service_config.max_batch_size / 2.0)
         memory_time = weight_bytes / (effective_bw * effective_decode_batch) + kv_bytes / effective_bw
 
-        # Decode communication
         comm = self._communication_breakdown(1, 1, phase="decode")
         comm_time = (
             comm.tp_time_per_token_ms + comm.pp_time_per_token_ms + comm.cp_time_per_token_ms
         ) / 1000.0
 
-        # KV offload access time
         offload_time = self.kv_offload_time_per_token
-
-        # AFD activation transfer time
         afd_time = self.afd_transfer_time_per_token
 
-        return max(compute_time, memory_time) + comm_time + offload_time + afd_time + self.optimization.decode_overhead_ms / 1000.0
+        decode_overhead_s = self.optimization.decode_overhead_ms / 1000.0
+        if decode_overhead_s == 0:
+            # No fixture override: apply architecture-specific default overhead.
+            decode_overhead_s = (10.0 if self.model.is_moe else 4.0) / 1000.0
+        elif decode_overhead_s < 0:
+            # Negative value is an explicit "disable default overhead" signal.
+            decode_overhead_s = 0.0
+
+        return {
+            "compute": compute_time,
+            "memory": memory_time,
+            "communication": comm_time,
+            "kv_offload": offload_time,
+            "afd_transfer": afd_time,
+            "overhead": decode_overhead_s,
+        }
+
+    def _effective_transfer_bw_gb_s(self, requested_bw_gb_s: float) -> float:
+        """Cap requested pool-to-pool bandwidth by cluster inter-node bandwidth."""
+        if self.cluster is None:
+            return requested_bw_gb_s
+        cluster_bw = self.cluster.topology.effective_inter_node_bw_gb_s
+        if requested_bw_gb_s <= 0:
+            return cluster_bw
+        return min(requested_bw_gb_s, cluster_bw)
 
     def _compute_kv_transfer_time_per_request(self) -> float:
         """Time to transfer KV cache from prefill pool to decode pool (PD)."""
@@ -417,7 +620,8 @@ class InferenceServingEngine:
         cfg = self.service_config
         avg_context_tokens = cfg.request_length_mean
         kv_bytes = avg_context_tokens * self.kv_bytes_per_token * self.optimization.kv_compression_ratio
-        bw_bytes_s = self.pd_config.kv_transfer_bw_gb_s * 1e9
+        bw_gb_s = self._effective_transfer_bw_gb_s(self.pd_config.kv_transfer_bw_gb_s)
+        bw_bytes_s = bw_gb_s * 1e9
         if bw_bytes_s <= 0:
             return 0.0
         transfer_time = kv_bytes / bw_bytes_s + self.pd_config.kv_transfer_latency_us * 1e-6
@@ -433,14 +637,17 @@ class InferenceServingEngine:
         return self.optimization.effective_kv_access_time_s(self.kv_bytes_per_token)
 
     def _compute_afd_transfer_time_per_token(self) -> float:
-        """Extra activation transfer time for AFD-separated decode."""
+        """Activation transfer time for AFD-separated prefill/decode."""
         if not self.afd_config.enabled:
             return 0.0
-        # Each layer: attention output -> FFN -> next layer attention
-        # Simplified: 2 * hidden * bytes per layer per token
+        # In a pipelined AFD deployment, only one layer's activation is in
+        # flight across the attention-FFN boundary at a time.  The per-token
+        # transfer footprint is therefore 2 * d_model (attention output -> FFN
+        # and FFN output -> next attention), not 2 * n_layers * d_model.
         hidden_bytes = self.model.d_model * self.bytes_per_param
-        bytes_per_token = 2 * self.model.n_layers * hidden_bytes
-        bw_bytes_s = self.afd_config.activation_transfer_bw_gb_s * 1e9
+        bytes_per_token = 2 * hidden_bytes
+        bw_gb_s = self._effective_transfer_bw_gb_s(self.afd_config.activation_transfer_bw_gb_s)
+        bw_bytes_s = bw_gb_s * 1e9
         if bw_bytes_s <= 0:
             return 0.0
         return bytes_per_token / bw_bytes_s + self.afd_config.activation_transfer_latency_us * 1e-6
@@ -687,16 +894,22 @@ class InferenceServingEngine:
             return float(np.percentile(values, p))
 
         mean_comm = self._communication_breakdown(1, 1, phase="decode")
+        prefill_breakdown = self._compute_prefill_breakdown()
+        decode_breakdown = self._compute_decode_breakdown()
+        bottleneck = self._infer_bottleneck(prefill_breakdown, decode_breakdown, feasible)
+        network_util = self._network_utilization(total_tokens, duration, mean_comm)
 
-        # Use analytical latency estimates for TTFT/TPOT metrics; event-driven
-        # simulation is good for throughput/dropping but can overstate queueing
-        # tails when pool instances are limited.
+        # Use analytical latency estimates for TTFT/TPOT p50; p99 is derived
+        # from p50.  Queueing is intentionally not modeled here because the
+        # batch-formation latency is small relative to compute/transfer for the
+        # calibrated fixtures; throughput and drops are captured by the event
+        # loop.  Event-driven percentiles are retained in metadata for
+        # diagnostics.
         analytical_prefill_ms = (
             self.prefill_time_per_token * cfg.request_length_mean * 1000.0
             + self.kv_transfer_time_per_request * 1000.0
+            + self.afd_transfer_time_per_token * cfg.request_length_mean * 1000.0
         )
-        # decode_time_per_token already includes the fixture-level decode_overhead_ms
-        # so the analytical TPOT is just the per-token decode latency.
         analytical_tpot_ms = self.decode_time_per_token * 1000.0
 
         return SimulationResult(
@@ -714,7 +927,7 @@ class InferenceServingEngine:
             memory_required_gb=self.hardware.memory_gb * self.gpu_count,
             gpu_count=self.gpu_count,
             feasible=feasible,
-            bottleneck="memory: HBM overflow" if not feasible else "",
+            bottleneck=bottleneck,
             cost_usd=cost_usd,
             utilization_gpu=utilization,
             metadata={
@@ -727,12 +940,19 @@ class InferenceServingEngine:
                 "ttft_p99_ms": analytical_prefill_ms * 2.0,
                 "tpot_p50_ms": analytical_tpot_ms,
                 "tpot_p99_ms": analytical_tpot_ms * 2.0,
+                "event_ttft_p50_ms": _p(ttfts, 50) * 1000.0 if ttfts else 0.0,
+                "event_ttft_p99_ms": _p(ttfts, 99) * 1000.0 if ttfts else 0.0,
+                "event_tpot_p50_ms": _p(tpots, 50) * 1000.0 if tpots else 0.0,
+                "event_tpot_p99_ms": _p(tpots, 99) * 1000.0 if tpots else 0.0,
                 "e2e_latency_p99_ms": _p(total_latencies, 99) * 1000,
                 "prefill_time_per_token_ms": self.prefill_time_per_token * 1000,
                 "decode_time_per_token_ms": self.decode_time_per_token * 1000,
                 "kv_transfer_time_per_request_ms": self.kv_transfer_time_per_request * 1000,
                 "kv_offload_time_per_token_ms": self.kv_offload_time_per_token * 1000,
                 "afd_transfer_time_per_token_ms": self.afd_transfer_time_per_token * 1000,
+                "prefill_breakdown_ms": {k: v * 1000.0 for k, v in prefill_breakdown.items()},
+                "decode_breakdown_ms": {k: v * 1000.0 for k, v in decode_breakdown.items()},
+                "network_utilization": network_util,
                 "tp": self.tp,
                 "pp": self.pp,
                 "cp": self.cp,

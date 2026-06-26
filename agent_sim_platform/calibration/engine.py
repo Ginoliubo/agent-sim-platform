@@ -26,6 +26,7 @@ from .fitting import (
 )
 from .metrics import aggregate_metric_errors, compute_errors, mape, rmse
 from .report import CalibrationReport
+from .residual import ResidualModel
 
 
 class CalibrationEngine:
@@ -47,6 +48,40 @@ class CalibrationEngine:
 
     def __init__(self, config: Optional[CalibrationConfig] = None):
         self.config = config or CalibrationConfig()
+        self.residual_model: Optional[ResidualModel] = None
+
+    def _extract_fixture_features(self, fixture: BenchmarkCase) -> Dict[str, float]:
+        """Extract features for the residual model from a fixture."""
+        cfg = dict(fixture.config)
+        model = MODEL_REGISTRY.get(fixture.model_name)
+        is_pd = bool(cfg.get("pd_config", {}).get("enabled"))
+        is_afd = bool(cfg.get("afd_config", {}).get("enabled"))
+        is_moe = getattr(model, "is_moe", False)
+        seq_len = float(cfg.get("request_length_mean", 4096))
+        gpu_count = float(cfg.get("gpu_count", 8))
+        if not gpu_count:
+            pd_cfg = cfg.get("pd_config")
+            afd_cfg = cfg.get("afd_config")
+            if isinstance(pd_cfg, dict) and pd_cfg.get("enabled"):
+                gpu_count = float(
+                    pd_cfg.get("prefill_gpu_count", 0) + pd_cfg.get("decode_gpu_count", 0)
+                )
+            elif isinstance(afd_cfg, dict) and afd_cfg.get("enabled"):
+                gpu_count = float(
+                    afd_cfg.get("attention_gpu_count", 0)
+                    + afd_cfg.get("ffn_gpu_count", 0)
+                    + afd_cfg.get("decode_gpu_count", 0)
+                )
+        cp = float(cfg.get("cp", 1))
+        return {
+            "seq_len": seq_len,
+            "model_params_b": float(model.total_params_b),
+            "gpu_count": int(gpu_count),
+            "is_pd": is_pd,
+            "is_afd": is_afd,
+            "is_moe": is_moe,
+            "cp": int(cp),
+        }
 
     def _resolve_model(self, fixture: BenchmarkCase, overrides: Dict[str, float]) -> Tuple[object, OptimizationConfig]:
         """Resolve model and optimization with overrides applied."""
@@ -123,15 +158,30 @@ class CalibrationEngine:
             kwargs["gpu_count"] = int(gpu_count)
 
         # Parallelism: prefer explicit config.
-        # For PD/AFD pools, infer a plausible (tp, pp, cp) split so that
-        # tp*pp*cp == pool_total and memory/communication are shardable.
+        # For PD/AFD pools, infer a per-request footprint that divides the
+        # *smallest* pool so that every pool can run at least one instance.
+        # The larger pool then runs more data-parallel instances.
         model = MODEL_REGISTRY.get(fixture.model_name)
         tp = cfg.get("tp")
         pp = cfg.get("pp")
         cp = cfg.get("cp")
         if tp is None or pp is None or cp is None:
             if pool_total > 0:
-                tp, pp, cp = self._infer_parallelism_for_pool(pool_total)
+                # Smallest relevant pool size
+                if isinstance(pd_cfg, dict) and pd_cfg.get("enabled"):
+                    smallest_pool = min(
+                        pd_cfg.get("prefill_gpu_count", pool_total),
+                        pd_cfg.get("decode_gpu_count", pool_total),
+                    )
+                elif isinstance(afd_cfg, dict) and afd_cfg.get("enabled"):
+                    smallest_pool = min(
+                        afd_cfg.get("attention_gpu_count", 1)
+                        + afd_cfg.get("ffn_gpu_count", 1),
+                        afd_cfg.get("decode_gpu_count", 1),
+                    )
+                else:
+                    smallest_pool = pool_total
+                tp, pp, cp = self._infer_parallelism_for_pool(smallest_pool)
             else:
                 tp = 8 if model.total_params_b >= 30 else 1
                 pp = 1
@@ -144,12 +194,16 @@ class CalibrationEngine:
     def _infer_parallelism_for_pool(pool_total: int) -> Tuple[int, int, int]:
         """Infer tp/pp/cp for one disaggregated pool.
 
-        Prefer a small per-request footprint (TP-only) so that multiple requests
-        can run data-parallel inside the pool.  CP/PP are left at 1; the caller
-        scales by running multiple instances of this (tp,pp,cp) group.
+        The per-request footprint (tp*pp*cp) should divide the pool size so
+        that multiple data-parallel instances can run inside the pool.  For
+        small pools we use the whole pool as TP; for larger pools we prefer
+        TP=8 and run the remainder as data-parallel instances.
         """
-        tp = min(8, max(1, pool_total))
-        return tp, 1, 1
+        # Choose the largest TP <= 8 that divides pool_total.
+        for tp in (8, 4, 2, 1):
+            if pool_total >= tp and pool_total % tp == 0:
+                return tp, 1, 1
+        return 1, 1, 1
 
     def _extract_predicted_metrics(
         self, fixture: BenchmarkCase, result
@@ -178,6 +232,11 @@ class CalibrationEngine:
             if decode_s == 0.0:
                 decode_s = result.metadata.get("decode_latency_per_token_seconds", 0.0)
             metrics["decode_latency_per_token_ms"] = float(decode_s) * 1000.0
+
+        if self.residual_model is not None:
+            features = self._extract_fixture_features(fixture)
+            metrics = self.residual_model.apply(fixture.name, features, metrics)
+
         return metrics
 
     def evaluate_fixture(
@@ -314,6 +373,49 @@ class CalibrationEngine:
         )
 
         return final_report
+
+    def fit_residual_model(
+        self,
+        registry,
+        constant_overrides: Optional[Dict[str, float]] = None,
+        save_path: Optional[str] = None,
+    ) -> CalibrationReport:
+        """Fit a hybrid analytical + linear-residual model and return report.
+
+        Steps:
+        1. Fit simulation constants (if not already done externally).
+        2. Run the analytical simulator with fitted constants.
+        3. Train a linear residual model on (observed - predicted) residuals.
+        4. Return a report where predictions include the residual correction.
+        """
+        # Step 1 & 2: get best constants and analytical predictions.
+        if constant_overrides is None:
+            constant_report = self.fit(registry)
+            constant_overrides = getattr(constant_report, "fitted_values", {})
+
+        # Gather analytical predictions and observed values with features.
+        fixtures_data = []
+        for fixture in registry.list(
+            domain=self.config.domain if self.config.domain != "all" else None
+        ):
+            evaluated = self.evaluate_fixture(fixture, overrides=constant_overrides)
+            features = self._extract_fixture_features(fixture)
+            fixtures_data.append(
+                (
+                    fixture.name,
+                    features,
+                    evaluated["observed"],
+                    evaluated["predicted"],
+                )
+            )
+
+        # Step 3: train residual model.
+        self.residual_model = ResidualModel().fit(fixtures_data)
+        if save_path:
+            self.residual_model.save(save_path)
+
+        # Step 4: re-evaluate with residual correction applied.
+        return self.evaluate_registry(registry, overrides=constant_overrides)
 
 
 __all__ = ["CalibrationEngine"]

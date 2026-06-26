@@ -4,6 +4,7 @@ from .engine import CalibrationEngine
 from .fitting import ConstantFitter, override_constants
 from .metrics import aggregate_metric_errors, compute_errors, mape, rmse, r2
 from .report import CalibrationReport, format_report
+from .residual import ResidualModel
 from ..data_models import CalibrationConfig
 
 __all__ = [
@@ -11,6 +12,7 @@ __all__ = [
     "CalibrationEngine",
     "CalibrationReport",
     "ConstantFitter",
+    "ResidualModel",
     "aggregate_metric_errors",
     "compute_errors",
     "format_report",

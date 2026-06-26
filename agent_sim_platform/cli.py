@@ -483,7 +483,14 @@ def cmd_calibrate(args) -> int:
         tolerance=args.tolerance,
     )
     engine = CalibrationEngine(config)
-    report = engine.fit(BENCHMARK_REGISTRY)
+
+    if args.residual:
+        report = engine.fit_residual_model(
+            BENCHMARK_REGISTRY,
+            save_path=args.residual_output,
+        )
+    else:
+        report = engine.fit(BENCHMARK_REGISTRY)
 
     if args.output:
         Path(args.output).write_text(
@@ -735,6 +742,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal.add_argument("--max-iterations", type=int, default=20, help="Max coordinate-descent iterations")
     p_cal.add_argument("--tolerance", type=float, default=0.01, help="Improvement tolerance")
     p_cal.add_argument("--output", help="Output JSON or Markdown file")
+    p_cal.add_argument("--residual", action="store_true", help="Also fit a linear residual model on top of analytical baseline")
+    p_cal.add_argument("--residual-output", help="Path to save trained residual model coefficients")
 
     # profile
     p_prof = subparsers.add_parser("profile", help="Multi-layer profiling of a trace or simulation result")

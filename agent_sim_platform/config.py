@@ -27,8 +27,11 @@ FEASIBILITY_MAX_MEMORY_UTIL = 0.95
 # Default utilization assumptions
 # ---------------------------------------------------------------------------
 
-DEFAULT_PREFILL_UTILIZATION = 0.35
+DEFAULT_PREFILL_UTILIZATION = 0.95
 DEFAULT_DECODE_UTILIZATION = 0.50
+DEFAULT_PREFILL_ATTENTION_HBM_PASSES = 200.0  # ceiling; effective passes decay with seq_len
+DEFAULT_PREFILL_SATURATION_TOKENS = 5000.0  # seq_len at which prefill util and attention reach half max
+DEFAULT_PREFILL_LATENCY_FLOOR_MS = 0.0  # per-request system latency floor
 
 # ---------------------------------------------------------------------------
 # Optimization layer presets

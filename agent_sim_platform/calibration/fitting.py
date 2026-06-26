@@ -16,8 +16,11 @@ from ..data_models import (
 # Parameter name -> (low, high, step)
 PARAMETER_RANGES: Dict[str, Tuple[float, float, float]] = {
     "mfu_target": (0.10, 0.70, 0.05),
-    "default_prefill_utilization": (0.10, 0.70, 0.05),
+    "default_prefill_utilization": (0.10, 0.95, 0.05),
     "default_decode_utilization": (0.10, 0.90, 0.05),
+    "default_prefill_attention_hbm_passes": (0.0, 2000.0, 100.0),
+    "default_prefill_saturation_tokens": (0.0, 500000.0, 5000.0),
+    "default_prefill_latency_floor_ms": (0.0, 500.0, 10.0),
     "activation_overhead_factor": (0.5, 2.0, 0.1),
     "continuous_batching_efficiency": (0.5, 2.0, 0.1),
     "kv_compression_ratio": (0.1, 1.0, 0.1),
@@ -104,6 +107,9 @@ class ConstantFitter:
             "mfu_target": 0.35,
             "default_prefill_utilization": sim_config.DEFAULT_PREFILL_UTILIZATION,
             "default_decode_utilization": sim_config.DEFAULT_DECODE_UTILIZATION,
+            "default_prefill_attention_hbm_passes": sim_config.DEFAULT_PREFILL_ATTENTION_HBM_PASSES,
+            "default_prefill_saturation_tokens": sim_config.DEFAULT_PREFILL_SATURATION_TOKENS,
+            "default_prefill_latency_floor_ms": sim_config.DEFAULT_PREFILL_LATENCY_FLOOR_MS,
             "activation_overhead_factor": 1.0,
             "continuous_batching_efficiency": 1.0,
             "kv_compression_ratio": 1.0,

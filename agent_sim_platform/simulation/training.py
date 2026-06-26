@@ -187,27 +187,27 @@ class TrainingEngine:
         )
         return total_flops / effective_flops
 
-    def _communication_time_per_step(
+    def _communication_breakdown_per_step(
         self, gpu_count: int, compute_time: float
-    ) -> float:
-        """Estimate communication time per step using topology-aware bandwidth."""
+    ) -> Dict[str, float]:
+        """Breakdown of communication time per step by parallelism type (seconds)."""
         cfg = self.training_config
         parallelism = cfg.parallelism
         model_size_bytes = self.model.total_params_b * 1e9 * self.bytes_per_param
 
-        comm_time = 0.0
+        breakdown: Dict[str, float] = {}
 
         # Data parallel gradient All-Reduce
         if parallelism.dp > 1 and cfg.zero_stage < 3:
             bytes_moved = 2 * (parallelism.dp - 1) / parallelism.dp * model_size_bytes
-            comm_time += self._communication_time(bytes_moved, parallelism.dp)
+            breakdown["dp_allreduce"] = self._communication_time(bytes_moved, parallelism.dp)
 
         # Tensor parallel all-reduce per layer
         if parallelism.tp > 1:
             layer_size_bytes = model_size_bytes / self.model.n_layers
             bytes_per_layer = 2 * layer_size_bytes  # two all-reduces per layer
             bytes_moved = self.model.n_layers * bytes_per_layer
-            comm_time += self._communication_time(bytes_moved, parallelism.tp)
+            breakdown["tp_allreduce"] = self._communication_time(bytes_moved, parallelism.tp)
 
         # Pipeline parallel bubble
         if parallelism.pp > 1:
@@ -216,7 +216,7 @@ class TrainingEngine:
                 cfg.global_batch_size // (cfg.micro_batch_size * parallelism.dp),
             )
             bubble_ratio = (parallelism.pp - 1) / (num_micro_batches + parallelism.pp - 1)
-            comm_time += compute_time * bubble_ratio
+            breakdown["pp_bubble"] = compute_time * bubble_ratio
 
         # MoE expert parallel all-to-all
         if self.model.is_moe and parallelism.ep > 1:
@@ -227,9 +227,67 @@ class TrainingEngine:
                 * self.bytes_per_param
             )
             bytes_moved = 2 * (parallelism.ep - 1) / parallelism.ep * hidden_bytes
-            comm_time += self._communication_time(bytes_moved, parallelism.ep)
+            breakdown["ep_alltoall"] = self._communication_time(bytes_moved, parallelism.ep)
 
-        return comm_time
+        return breakdown
+
+    def _communication_time_per_step(
+        self, gpu_count: int, compute_time: float
+    ) -> float:
+        """Estimate communication time per step using topology-aware bandwidth."""
+        return sum(self._communication_breakdown_per_step(gpu_count, compute_time).values())
+
+    def _network_utilization(
+        self,
+        communication_breakdown: Dict[str, float],
+        step_time: float,
+        gpu_count: int,
+    ) -> float:
+        """Estimate peak inter-node network bandwidth utilization (0-1).
+
+        Uses the largest single communication payload and step time to bound
+        peak utilization; sustained utilization will be lower due to overlap.
+        """
+        if step_time <= 0 or not communication_breakdown:
+            return 0.0
+
+        cfg = self.training_config
+        parallelism = cfg.parallelism
+        model_size_bytes = self.model.total_params_b * 1e9 * self.bytes_per_param
+
+        # Largest payload: DP all-reduce or EP all-to-all
+        max_bytes = 0.0
+        if parallelism.dp > 1 and cfg.zero_stage < 3:
+            max_bytes = max(
+                max_bytes,
+                2 * (parallelism.dp - 1) / parallelism.dp * model_size_bytes,
+            )
+        if self.model.is_moe and parallelism.ep > 1:
+            hidden_bytes = (
+                cfg.global_batch_size
+                * cfg.sequence_length
+                * self.model.d_model
+                * self.bytes_per_param
+            )
+            max_bytes = max(
+                max_bytes,
+                2 * (parallelism.ep - 1) / parallelism.ep * hidden_bytes,
+            )
+
+        bytes_per_sec = max_bytes / step_time
+
+        if self.cluster is not None:
+            total_inter_node_bw = (
+                self.cluster.topology.aggregate_inter_node_bw_gb_s
+                * self.cluster.node_count
+                * 1e9
+            )
+        else:
+            total_inter_node_bw = self.hardware.interconnect_bw_gb_s * gpu_count * 1e9
+
+        if total_inter_node_bw <= 0:
+            return 0.0
+        return min(1.0, bytes_per_sec / total_inter_node_bw)
 
     def _estimate_gpu_count(self) -> int:
         """Estimate required GPU count based on memory."""
@@ -257,7 +315,8 @@ class TrainingEngine:
         memory_per_gpu = self._memory_per_gpu_gb(gpu_count)
 
         compute_time = self._compute_time_per_step(gpu_count)
-        communication_time = self._communication_time_per_step(gpu_count, compute_time)
+        comm_breakdown = self._communication_breakdown_per_step(gpu_count, compute_time)
+        communication_time = sum(comm_breakdown.values())
         data_loading_time = compute_time * cfg.data_loading_overhead_fraction
 
         step_time = compute_time + communication_time + data_loading_time
@@ -271,13 +330,24 @@ class TrainingEngine:
         if memory_per_gpu > self.hardware.memory_gb:
             bottleneck = "memory: HBM overflow"
         elif communication_time > compute_time * 0.5:
-            bottleneck = "communication: interconnect bottleneck"
+            # Distinguish intra-node vs cross-node communication bottleneck
+            cross_node_frac = 0.0
+            if self.cluster is not None:
+                for group_size in (cfg.parallelism.dp, cfg.parallelism.tp, cfg.parallelism.ep):
+                    if group_size > 1:
+                        cross_node_frac = max(cross_node_frac, self._cross_node_fraction(group_size))
+            if cross_node_frac > 0.5:
+                bottleneck = "network: cross-node interconnect bottleneck"
+            else:
+                bottleneck = "network: intra-node interconnect bottleneck"
         elif data_loading_time > compute_time * 0.2:
             bottleneck = "data-loading: IO bottleneck"
         else:
             bottleneck = "compute: GPU-bound"
 
         cost_usd = (total_time / 3600.0) * self.hardware.cost_per_hour * gpu_count
+
+        network_util = self._network_utilization(comm_breakdown, step_time, gpu_count)
 
         # Build a SimulationResult with training-specific metadata
         sim_config = SimulationConfig(
@@ -308,6 +378,8 @@ class TrainingEngine:
                 "step_time_seconds": step_time,
                 "compute_time_seconds": compute_time,
                 "communication_time_seconds": communication_time,
+                "communication_breakdown_seconds": comm_breakdown,
+                "network_utilization": network_util,
                 "total_flops": total_flops,
                 "mfu": mfu,
                 "memory_per_gpu_gb": memory_per_gpu,

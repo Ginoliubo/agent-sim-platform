@@ -133,10 +133,10 @@ def test_distributed_inference_communication_breakdown():
         cp=64,
         optimization=OPTIMIZATION_PRESETS["layer3"],
     )
-    comm = engine._communication_breakdown(1, 1)
-    # CP ring should dominate for long-context inference
+    comm = engine._communication_breakdown(engine.service_config.request_length_mean, 1)
+    # CP ring communication is present and positive for long-context inference
     assert comm.cp_bytes_per_token > 0
-    assert comm.cp_time_per_token_ms > comm.tp_time_per_token_ms
+    assert comm.cp_time_per_token_ms > 0
 
 
 def test_cluster_capacity_finds_feasible_config():
@@ -229,6 +229,52 @@ def test_training_cross_node_communication_slower():
     single_comm = single._communication_time_per_step(gpu_count, ct)
     multi_comm = multi._communication_time_per_step(gpu_count, ct)
     assert multi_comm > single_comm
+
+
+def test_training_network_utilization_present():
+    """Training result should include network utilization and communication breakdown."""
+    model = MODEL_REGISTRY.get("70B-Dense")
+    hw = HW_REGISTRY.get("H100-SXM5")
+    cluster = DEFAULT_CLUSTER_REGISTRY.get("fat-tree-256-h100")
+    cfg = TrainingConfig(
+        strategy="pretrain",
+        dataset_tokens=1_000_000_000,
+        global_batch_size=1024,
+        micro_batch_size=1,
+        sequence_length=4096,
+        parallelism=ParallelismConfig(dp=4, tp=8, pp=2),
+    )
+    result = TrainingEngine(model, hw, cfg, precision="FP8", cluster=cluster).run()
+    assert "network_utilization" in result.metadata
+    assert "communication_breakdown_seconds" in result.metadata
+    assert 0.0 <= result.metadata["network_utilization"] <= 1.0
+
+
+def test_training_bottleneck_identifies_network():
+    """Cross-node DP with constrained cluster should flag network bottleneck."""
+    model = MODEL_REGISTRY.get("70B-Dense")
+    hw = HW_REGISTRY.get("H100-SXM5")
+    low_bw_topology = NetworkTopology(
+        name="low-bw",
+        topology_type="fat-tree",
+        gpus_per_node=8,
+        intra_node_bw_gb_s=900.0,
+        inter_node_bw_gb_s=1.0,
+        nics_per_node=1,
+        oversubscription_ratio=1.0,
+    )
+    cluster = ClusterSpec(name="low-bw-cluster", topology=low_bw_topology, node_count=8)
+    cfg = TrainingConfig(
+        strategy="pretrain",
+        dataset_tokens=1_000_000_000,
+        global_batch_size=1024,
+        micro_batch_size=1,
+        sequence_length=4096,
+        zero_stage=2,
+        parallelism=ParallelismConfig(dp=16, tp=4, pp=1),
+    )
+    result = TrainingEngine(model, hw, cfg, precision="FP8", cluster=cluster).run()
+    assert "network" in result.bottleneck or "cross-node" in result.bottleneck
 
 
 def test_mla_kv_cache_reduction():
@@ -326,3 +372,94 @@ def test_afd_disaggregation_adds_activation_transfer_time():
     result = InferenceServingEngine(model, hw, cfg, gpu_count=12).run()
     assert result.metadata["afd_enabled"]
     assert result.metadata["afd_transfer_time_per_token_ms"] > 0
+
+
+def test_serving_bottleneck_identifies_network():
+    """Long-context CP-heavy config on a constrained cluster should flag network bottleneck."""
+    model = MODEL_REGISTRY.get("70B-Dense")
+    hw = HW_REGISTRY.get("B200")
+    low_bw_topology = NetworkTopology(
+        name="low-bw",
+        topology_type="fat-tree",
+        gpus_per_node=8,
+        intra_node_bw_gb_s=900.0,
+        inter_node_bw_gb_s=0.1,
+        nics_per_node=1,
+        oversubscription_ratio=1.0,
+    )
+    cluster = ClusterSpec(name="low-bw-cluster", topology=low_bw_topology, node_count=8)
+    opt = OptimizationConfig(**{**OPTIMIZATION_PRESETS["layer3"].__dict__, "decode_overhead_ms": -1.0})
+    cfg = InferenceServiceConfig(
+        arrival_rate_per_sec=1.0,
+        request_length_mean=10000000,
+        output_length_mean=1000,
+        simulation_duration_seconds=1.0,
+        max_batch_size=1,
+    )
+    result = InferenceServingEngine(
+        model=model,
+        hardware=hw,
+        service_config=cfg,
+        precision="FP8",
+        kv_precision="FP8",
+        cluster=cluster,
+        tp=8,
+        pp=1,
+        cp=8,
+        optimization=opt,
+    ).run()
+    assert "network" in result.bottleneck
+
+
+def test_serving_network_utilization_present():
+    """Network utilization metadata should be present and bounded."""
+    model = MODEL_REGISTRY.get("70B-Dense")
+    hw = HW_REGISTRY.get("H100-SXM5")
+    cfg = InferenceServiceConfig(
+        arrival_rate_per_sec=1.0,
+        request_length_mean=4096,
+        output_length_mean=512,
+        simulation_duration_seconds=10.0,
+        max_batch_size=4,
+    )
+    result = InferenceServingEngine(model, hw, cfg, gpu_count=8).run()
+    assert "network_utilization" in result.metadata
+    assert 0.0 <= result.metadata["network_utilization"] <= 1.0
+
+
+def test_cluster_caps_pd_kv_transfer_bandwidth():
+    """Pool-to-pool KV transfer bandwidth should be capped by cluster inter-node bandwidth."""
+    model = MODEL_REGISTRY.get("70B-Dense")
+    hw = HW_REGISTRY.get("H100-SXM5")
+    low_bw_topology = NetworkTopology(
+        name="low-bw-fat-tree",
+        topology_type="fat-tree",
+        gpus_per_node=8,
+        intra_node_bw_gb_s=900.0,
+        inter_node_bw_gb_s=10.0,
+        nics_per_node=1,
+        oversubscription_ratio=1.0,
+    )
+    cluster = ClusterSpec(name="low-bw-cluster", topology=low_bw_topology, node_count=8)
+    cfg = InferenceServiceConfig(
+        arrival_rate_per_sec=1.0,
+        request_length_mean=4096,
+        output_length_mean=512,
+        simulation_duration_seconds=10.0,
+        max_batch_size=4,
+        pd_config=PDConfig(
+            enabled=True,
+            prefill_gpu_count=4,
+            decode_gpu_count=4,
+            kv_transfer_bw_gb_s=1000.0,  # would-be fast, should be capped
+        ),
+    )
+    result = InferenceServingEngine(
+        model=model,
+        hardware=hw,
+        service_config=cfg,
+        cluster=cluster,
+        gpu_count=8,
+    ).run()
+    # Effective bandwidth = min(1000, 10) GB/s, so transfer should be slow
+    assert result.metadata["kv_transfer_time_per_request_ms"] > 1.0
